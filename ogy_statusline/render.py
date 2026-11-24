@@ -278,6 +278,10 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
 def run_statusline_from_stdin() -> int:
     """Fail-open stdin entrypoint for `ogy-hook statusline`."""
     try:
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
         if not isinstance(payload, dict):
