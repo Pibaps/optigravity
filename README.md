@@ -10,15 +10,16 @@ It reduces billable token usage while preserving the native `agy` TUI, OAuth quo
 1. [Requirements & Installation](#1-requirements--installation)
 2. [Quick Start](#2-quick-start)
 3. [CLI Reference (`ogy`)](#3-cli-reference-ogy)
-4. [Task Routing (Stage 1 & Stage 2)](#4-task-routing-stage-1--stage-2)
-5. [Context Health & Pricing Policy](#5-context-health--pricing-policy)
-6. [Real-Time Statusline HUD](#6-real-time-statusline-hud)
-7. [Fail-Open Hooks & Firebreaks](#7-fail-open-hooks--firebreaks)
-8. [Shell Compression (`ogy wrap` & `ogy recall`)](#8-shell-compression-ogy-wrap--ogy-recall)
-9. [Minimal MCP Server (`ogy-mcp`)](#9-minimal-mcp-server-ogy-mcp)
-10. [Configuration (`config.toml`)](#10-configuration-configtoml)
-11. [Troubleshooting & Safety](#11-troubleshooting--safety)
-12. [A/B Benchmarks Summary](#12-ab-benchmarks-summary)
+4. [Interactive ACP TUI (`ogy tui`)](#4-interactive-acp-tui-ogy-tui)
+5. [Task Routing (Stage 1 & Stage 2)](#5-task-routing-stage-1--stage-2)
+6. [Context Health & Pricing Policy](#6-context-health--pricing-policy)
+7. [Real-Time Statusline HUD](#7-real-time-statusline-hud)
+8. [Fail-Open Hooks & Firebreaks](#8-fail-open-hooks--firebreaks)
+9. [Shell Compression (`ogy wrap` & `ogy recall`)](#9-shell-compression-ogy-wrap--ogy-recall)
+10. [Minimal MCP Server (`ogy-mcp`)](#10-minimal-mcp-server-ogy-mcp)
+11. [Configuration (`config.toml`)](#11-configuration-configtoml)
+12. [Troubleshooting & Safety](#12-troubleshooting--safety)
+13. [A/B Benchmarks Summary](#13-ab-benchmarks-summary)
 
 ---
 
@@ -69,8 +70,11 @@ ogy init --dry-run
 # 3. Install statusLine, hooks, rules, skills, and lazy MCP config (creates *.ogy.bak backups)
 ogy init
 
-# 4. Launch agy through the Optigravity router
+# 4. Launch agy through the Optigravity router (native TUI)
 ogy run "Fix typo in README"
+
+# 5. Or launch the interactive ACP TUI with live thoughtTokens & session rotation
+ogy tui
 ```
 
 ---
@@ -85,6 +89,16 @@ Routes your prompt through the 2-stage router, sets `AGY_CLI_DISABLE_AUTO_UPDATE
 * `--mode <mode>` — Override execution mode (`plan`, `accept-edits`, `auto`)
 * `--sandbox` — Pass `--sandbox` to `agy`
 * `--dry-run` — Print the resolved `agy` command and routing metadata without launching
+
+### `ogy tui [OPTIONS] [PROMPT]` (alias: `ogy chat`)
+Launches the interactive Textual TUI backed by `agy acp` (ACP v1 JSON-RPC 2.0 over stdio), with live `thoughtTokens`, dynamic `model`/`effort`/`mode` switching, steering, and one-key session rotation. See [Interactive ACP TUI (`ogy tui`)](#4-interactive-acp-tui-ogy-tui) for the full guide.
+
+* `--cwd <path>` — Workspace directory (default: `.`)
+* `--sandbox` — Pass `--sandbox` to `agy acp`
+* `--add-dir <path>` — Additional directory (`--add-dir`, repeatable)
+* `--agent <name>` — Agent profile (`--agent`)
+* `--log-file <path>` — ACP debug log file (`--log-file`)
+* `--auth-mode <mode>` — Auth mode (`oauth-personal` default, or `api-key`)
 
 ### `ogy doctor [--probe-agy]`
 Checks local paths, configuration, and SQLite WAL database health. With `--probe-agy`, runs Phase 0 probes against your local `agy` binary (`--version`, `--help`, `models`, `mcp list`, read-only DB inspection, and `python -S` cold-start benchmark).
@@ -113,6 +127,9 @@ Runs the 8 automated waste-detection queries:
 7. **MCP schema bloat** (`tools_schema_tokens > 15,000`)
 8. **Subagent drift** (`subagent_cost > parent_cost` or failed subagents)
 
+### `ogy router-eval [--category <cat>] [--min-samples <n>] [--json]`
+Runs an offline shadow evaluation of Stage 2 bandit arms vs Stage 1 on historical `routing_decisions` in `ogy.db`.
+
 ### `ogy audit mcp [--json]`
 Inspects `mcp_config.json` files for `eager: true` servers and UI-only tools (`_meta.ui.visibility: ["app"]`) leaking into CLI context, and outputs a minimal `enabledTools` profile.
 
@@ -124,7 +141,32 @@ Retrieves raw stashed output saved by `ogy wrap` from `~/.cache/optigravity/stas
 
 ---
 
-## 4. Task Routing (Stage 1 & Stage 2)
+## 4. Interactive ACP TUI (`ogy tui`)
+
+`ogy tui` (or `ogy chat`) connects directly to `agy acp` over JSON-RPC 2.0 (`stdio`), reusing `ogy_core` in memory while keeping `ogy-hook` / `ogy statusline` 100 % stdlib.
+
+### Key Capabilities
+* **Live Telemetry Sidebar**: Displays `thoughtTokens` in real time, `input` / `cached_read` / `output` tokens, cache hit %, idle gap, a visual **Context Rot** bar (`GREEN` / `AMBER` / `RED`), estimated USD cost, and the latest cached `5h / 7j` quotas from `ogy.db` (never polls `agy -p /usage` in a loop).
+* **Streaming & Collapsible Thoughts**: Renders assistant responses in streaming Markdown, keeps `agent_thought_chunk` blocks collapsible, and shows live tool call cards (`running` / `completed` / `failed`).
+* **Concurrent Steering & Safe Cancel**: Submitting a new prompt while a turn is active steers the agent in flight; pressing `Ctrl+C` sends `session/cancel` without killing the `agy acp` process (`Ctrl+Q` quits).
+* **Interactive Permissions Modal**: Handles `session/request_permission` (`allow_once`, `allow_always`, `reject_once`) with Optigravity firebreak reminders.
+
+### Slash Commands & Shortcuts
+* `/model <slug>` — Switch model via `session/set_config_option`
+* `/effort <low|medium|high|xhigh|max>` — Adjust `thinking_level` dynamically
+* `/mode <default|accept-edits|auto|plan>` — Change execution mode (`yolo` is rejected)
+* `/rotate` (or `/clear`, `Ctrl+R`) — Clean multi-session rotation: writes `.ogy/handoff.md`, closes the saturated session, opens a fresh session, and injects the handoff
+* `/handoff` — Write `.ogy/handoff.md` (`<= 30` lines) without closing the session
+* `/new` (`Ctrl+N`), `/sessions`, `/resume <session_id>` — Multi-session management via `session/resume`
+
+### Assisted Orchestration & Cache Preservation
+* **Switch Tax & `> 60K` Delegation Rule**: After `>= 2` consecutive tool failures on a low/medium profile, `ogy tui` calculates the prefix cache invalidation cost (**Switch Tax**). At `<= 60K` context tokens, it proposes an upgrade (`[U]`); above `60K` tokens, it proposes delegating the blocking sub-problem to a strong subagent (`[D]`) so the parent prefix cache stays intact.
+* **Red-Zone Rotation**: When context reaches `>= 100K` tokens, `exceeds_200k`, or `idle_gap > 180s` above `60K`, a banner proposes a one-key clean rotation (`[R]`).
+* **OAuth Personal Scope**: Under `oauth-personal`, `ogy tui` operates on Gemini 4 models by default with user-confirmed proposals. If you request Claude 5.5, `ogy tui` suggests switching cleanly to `ogy run --model claude-...` to preserve 100 % of your Pro/Ultra Claude quota.
+
+---
+
+## 5. Task Routing (Stage 1 & Stage 2)
 
 Optigravity follows a **stickiness rule**: model and effort are chosen at launch (or subagent boundary) and never changed mid-session to avoid invalidating the prompt prefix cache.
 
@@ -141,7 +183,7 @@ Optigravity follows a **stickiness rule**: model and effort are chosen at launch
 
 ---
 
-## 5. Context Health & Pricing Policy
+## 6. Context Health & Pricing Policy
 
 * **Green Zone** (`< 60K` tokens, `< 15` turns, cache hit `>= 60%`): Keep warm (`keep_warm`).
 * **Amber Zone** (`60K–100K` tokens or `15–25` turns): Stay frugal, use `/btw` for side questions (`frugal_btw`).
@@ -153,7 +195,7 @@ Optigravity follows a **stickiness rule**: model and effort are chosen at launch
 
 ---
 
-## 6. Real-Time Statusline HUD
+## 7. Real-Time Statusline HUD
 
 Configured in `~/.gemini/antigravity-cli/settings.json`:
 
@@ -179,7 +221,7 @@ Snapshots are persisted to SQLite with a 10-second debounce.
 
 ---
 
-## 7. Fail-Open Hooks & Firebreaks
+## 8. Fail-Open Hooks & Firebreaks
 
 `ogy-hook <event>` imports **only the Python standard library** and wraps `main()` in `try/except BaseException` so a hook failure never blocks `agy` (always returns valid JSON and exits `0`).
 
@@ -195,7 +237,7 @@ Snapshots are persisted to SQLite with a 10-second debounce.
 
 ---
 
-## 8. Shell Compression (`ogy wrap` & `ogy recall`)
+## 9. Shell Compression (`ogy wrap` & `ogy recall`)
 
 `ogy wrap -- pytest -v` filters ANSI noise and passing chatter while keeping errors, tracebacks, and summaries. On any reduction or non-zero exit code, the full raw output is saved to `~/.cache/optigravity/stash/<sha256>.log` and a short recall hash is printed:
 
@@ -211,7 +253,7 @@ ogy recall a3f9c012e4b1 --lines 1:80
 
 ---
 
-## 9. Minimal MCP Server (`ogy-mcp`)
+## 10. Minimal MCP Server (`ogy-mcp`)
 
 Registered with `eager: false` in `mcp_config.json` and exposes 3 concise tools:
 * `ogy_session_budget(session_id?)` — Active context tokens, warm cache hit %, idle gap, top waste, and recommended action.
@@ -220,7 +262,7 @@ Registered with `eager: false` in `mcp_config.json` and exposes 3 concise tools:
 
 ---
 
-## 10. Configuration (`config.toml`)
+## 11. Configuration (`config.toml`)
 
 Optional configuration file at `~/.config/optigravity/config.toml`:
 
@@ -246,7 +288,7 @@ You can also override the SQLite database location with the `OGY_DB_PATH` enviro
 
 ---
 
-## 11. Troubleshooting & Safety
+## 12. Troubleshooting & Safety
 
 * **Running tests**: `pytest -v` (or `uv run pytest -v`)
 * **Windows paths**: Never use `~` or single backslashes `\` inside `settings.json` or `hooks.json`; `ogy init` handles this automatically.
@@ -254,7 +296,7 @@ You can also override the SQLite database location with the `OGY_DB_PATH` enviro
 
 ---
 
-## 12. A/B Benchmarks Summary
+## 13. A/B Benchmarks Summary
 
 Controlled A/B benchmarks (`agy 1.5.16`, `gemini-4-hydrogen-medium`, `--effort medium`) show that Optigravity's savings scale with repository size and noise while preserving 100 % test integrity:
 
