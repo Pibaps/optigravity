@@ -18,6 +18,7 @@ It reduces billable token usage while preserving the native `agy` TUI, OAuth quo
 9. [Minimal MCP Server (`ogy-mcp`)](#9-minimal-mcp-server-ogy-mcp)
 10. [Configuration (`config.toml`)](#10-configuration-configtoml)
 11. [Troubleshooting & Safety](#11-troubleshooting--safety)
+12. [A/B Benchmarks Summary](#12-ab-benchmarks-summary)
 
 ---
 
@@ -183,7 +184,7 @@ Snapshots are persisted to SQLite with a 10-second debounce.
 `ogy-hook <event>` imports **only the Python standard library** and wraps `main()` in `try/except BaseException` so a hook failure never blocks `agy` (always returns valid JSON and exits `0`).
 
 * `session-start` — Registers the session and injects `.ogy/handoff.md` once via `injectSteps`, then archives it.
-* `pre-tool` — Returns `{"decision": ""}` nominally (never `{}`), or `deny` / `overwrite` for:
+* `pre-tool` — Returns `{"decision": "allow"}` nominally (never `{}` or `""`), or `deny` / `overwrite` for:
   1. **Anti-loop**: blocks repeated failing tool calls (`>= 3` errors on the same `args_hash`).
   2. **Obese reads**: blocks lockfiles and files `> 16 KB` read without `StartLine`/`EndLine`.
   3. **Shell compression**: wraps verbose commands (`pytest`, `cargo test`, `git log/diff/status`, etc.) into `ogy wrap -- <cmd>`, while strictly excluding mutating commands (`git commit`, `git push`, `git rebase`, `rm`, etc.).
@@ -250,3 +251,17 @@ You can also override the SQLite database location with the `OGY_DB_PATH` enviro
 * **Running tests**: `pytest -v` (or `uv run pytest -v`)
 * **Windows paths**: Never use `~` or single backslashes `\` inside `settings.json` or `hooks.json`; `ogy init` handles this automatically.
 * **Firebreaks disabled by default**: `ogy init` installs `ogy-firebreaks` with `"enabled": false` until you have verified `ogy doctor --probe-agy` and opt in with `ogy init --enable-firebreaks`.
+
+---
+
+## 12. A/B Benchmarks Summary
+
+Controlled A/B benchmarks (`agy 1.5.16`, `gemini-4-hydrogen-medium`, `--effort medium`) show that Optigravity's savings scale with repository size and noise while preserving 100 % test integrity:
+
+| Benchmark | Input Tokens vs `agy` | Cost vs `agy` | Turns / Latency vs `agy` | Quality / Tests |
+| --- | --- | --- | --- | --- |
+| **Noisy Repo** (209 KB lockfile, 122 KB log) | **-58.8 %** | **-51.8 %** | -20.0 % turns / -18.3 % latency | 100 % PASS (`CHARGE_OK`) |
+| **`pallets/click`** (160 KB `core.py`) | **-10.3 %** *(no FB)* / **-6.3 %** *(FB)* | **-10.2 %** / **-5.9 %** | **-17.4 %** latency *(FB)* | **2,556 / 2,556 PASS** |
+| **`yt-dlp/yt-dlp`** (1,500+ files, 200 KB modules) | **-19.6 %** *(no FB)* / **-29.7 %** *(FB)* | **-16.2 %** / **-21.8 %** | **-37.5 %** turns *(FB)* | **130 / 130 PASS** |
+
+See [BENCHMARKS.md](BENCHMARKS.md) for the full 3-arm tables, methodology, and observed protocol notes.

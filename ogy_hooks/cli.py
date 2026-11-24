@@ -27,7 +27,7 @@ from ogy_core.storage import (
 
 def _neutral_response(event: str) -> dict[str, Any]:
     if event == "pre-tool":
-        return {"decision": ""}
+        return {"decision": "allow"}
     if event == "stop":
         return {"decision": "stop"}
     return {}

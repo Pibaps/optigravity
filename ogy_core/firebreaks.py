@@ -46,7 +46,7 @@ def evaluate_pre_tool_firebreaks(
     tool_args: dict[str, Any],
     cfg: OgyConfig,
 ) -> dict[str, Any]:
-    """Evaluate PreToolUse firebreaks. Never returns {} (nominal is {'decision': ''})."""
+    """Evaluate PreToolUse firebreaks. Nominal allow response is {'decision': 'allow'}."""
     name = (tool_name or "").strip()
     args_hash = canonical_args_hash(tool_args)
 
@@ -101,7 +101,7 @@ def evaluate_pre_tool_firebreaks(
                 wrapped = f"ogy wrap -- {cmd}"
                 if cfg.overwrite_verified_ok:
                     return {
-                        "decision": "",
+                        "decision": "allow",
                         "overwrite": {"CommandLine": wrapped},
                     }
                 return {
@@ -109,7 +109,7 @@ def evaluate_pre_tool_firebreaks(
                     "reason": f"[ogy] Commande verbeuse detectee. Relance avec: {wrapped}",
                 }
 
-    return {"decision": ""}
+    return {"decision": "allow"}
 
 
 def compress_shell_output(raw_text: str, *, exit_code: int) -> str:

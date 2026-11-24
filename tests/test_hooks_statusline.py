@@ -42,7 +42,7 @@ def test_hooks_fail_open_on_bad_stdin(monkeypatch, capsys) -> None:
     rc = hooks_main(["pre-tool"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out.strip())
-    assert out == {"decision": ""}
+    assert out == {"decision": "allow"}
 
     monkeypatch.setattr(sys, "stdin", io.StringIO("{invalid json"))
     rc2 = hooks_main(["post-tool"])

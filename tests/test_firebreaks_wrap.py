@@ -63,7 +63,7 @@ def test_firebreak_obese_read_and_lockfile(tmp_path: Path) -> None:
     )
     assert res_big["decision"] == "deny"
 
-    # Large file with StartLine/EndLine allowed (nominal decision "")
+    # Large file with StartLine/EndLine allowed (nominal decision "allow")
     res_bounded = evaluate_pre_tool_firebreaks(
         None,
         session_id="s1",
@@ -71,7 +71,7 @@ def test_firebreak_obese_read_and_lockfile(tmp_path: Path) -> None:
         tool_args={"Path": str(big_file), "StartLine": 1, "EndLine": 50},
         cfg=cfg,
     )
-    assert res_bounded == {"decision": ""}
+    assert res_bounded == {"decision": "allow"}
 
 
 def test_firebreak_wrap_and_exclusions(tmp_path: Path) -> None:
@@ -87,14 +87,14 @@ def test_firebreak_wrap_and_exclusions(tmp_path: Path) -> None:
     res2 = evaluate_pre_tool_firebreaks(
         None, session_id="s1", tool_name="run_command", tool_args={"CommandLine": "pytest -v"}, cfg=cfg_ow
     )
-    assert res2 == {"decision": "", "overwrite": {"CommandLine": "ogy wrap -- pytest -v"}}
+    assert res2 == {"decision": "allow", "overwrite": {"CommandLine": "ogy wrap -- pytest -v"}}
 
     # Excluded mutating commands must pass untouched
     for excluded in ("git commit -m 'msg'", "git push origin main", "rm -rf build"):
         res_ex = evaluate_pre_tool_firebreaks(
             None, session_id="s1", tool_name="run_command", tool_args={"CommandLine": excluded}, cfg=cfg_ow
         )
-        assert res_ex == {"decision": ""}
+        assert res_ex == {"decision": "allow"}
 
 
 def test_wrap_tee_on_failure_and_recall(tmp_path: Path, capsys) -> None:
