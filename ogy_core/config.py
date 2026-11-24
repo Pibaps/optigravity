@@ -20,7 +20,7 @@ class OgyConfig:
     agy_config_dir: Path
     stash_dir: Path
     state_dir: Path
-    overwrite_verified_ok: bool = False
+    overwrite_verified_ok: bool = True
     enterprise_cache_pricing: bool = False
     budget_hard_cap_usd: float | None = None
     default_plan_tier: str = "pro"

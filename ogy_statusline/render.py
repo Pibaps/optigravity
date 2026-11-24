@@ -88,11 +88,19 @@ def _read_db_fallback(db_path: Path, session_id: str) -> tuple[int, int, int, in
                 row = conn.execute(
                     """
                     SELECT total_input_tokens, total_cache_read_tokens, total_cache_creation_tokens,
-                           turns_cost_usd, total_cost_usd, turn_count, peak_context_tokens
-                    FROM v_session_kpis ORDER BY started_at DESC LIMIT 1
+                           turns_cost_usd, total_cost_usd, turn_count, peak_context_tokens, session_id
+                    FROM v_session_kpis WHERE status = 'active' ORDER BY started_at DESC LIMIT 1
                     """
                 ).fetchone()
                 trow = None
+                if row and row[7]:
+                    trow = conn.execute(
+                        """
+                        SELECT input_tokens, cache_read_tokens, cache_creation_tokens, context_window_used
+                        FROM turns WHERE session_id = ? ORDER BY step_index DESC LIMIT 1
+                        """,
+                        (row[7],),
+                    ).fetchone()
             if not row:
                 return 0, 0, 0, 0, 0.0, 0
             in_tok = int(row[0] or 0)
@@ -181,7 +189,7 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
 
     session_id = str(payload.get("conversationId") or payload.get("session_id") or payload.get("conversation_id") or "").strip()
 
-    if persist and denom == 0 and total_usd == 0.0:
+    if persist and denom == 0 and total_usd == 0.0 and payload.get("agent_state") != "authenticating":
         cfg = load_config()
         sample_path = cfg.stash_dir.parent / "statusline_sample.json"
         if not sample_path.is_file():
