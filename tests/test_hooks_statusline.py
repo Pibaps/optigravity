@@ -102,3 +102,47 @@ def test_statusline_render_wide_and_narrow(monkeypatch) -> None:
 
     narrow = render_statusline(payload, terminal_width=90, persist=False)
     assert narrow == "ogy | c:92% | 64K | $0.24 | 5h:88% | WARN"
+
+
+def test_statusline_camelcase_and_db_fallback(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_path = tmp_path / "ogy.db"
+    monkeypatch.setenv("OGY_DB_PATH", str(db_path))
+
+    # 1. camelCase payload keys
+    camel = {
+        "conversationId": "sess-camel",
+        "usage": {"inputTokens": 2_000, "cacheReadInputTokens": 8_000},
+        "contextWindow": {"usedTokens": 10_000, "maxTokens": 200_000},
+        "totalCostUsd": 0.12,
+    }
+    line = render_statusline(camel, terminal_width=140, persist=False)
+    assert "ogy | cache 80% | ctx 10K (5%) | $0.12 | OK" == line
+
+    # 2. DB fallback when statusLine payload omits usage/cost
+    from ogy_core.storage import connect, ensure_session, upsert_turn
+
+    conn = connect(db_path, init_schema=True)
+    try:
+        ensure_session(conn, session_id="sess-fb", workspace_path=str(tmp_path))
+        upsert_turn(
+            conn,
+            session_id="sess-fb",
+            step_index=1,
+            model_id="gemini-4-hydrogen",
+            input_tokens=4_000,
+            cache_read_tokens=16_000,
+            output_tokens=200,
+            context_window_used=20_000,
+            estimated_cost_usd=0.05,
+        )
+    finally:
+        conn.close()
+
+    fb_line = render_statusline(
+        {"conversationId": "sess-fb", "quota": {"gemini-5h": {"remaining_fraction": 0.6}}},
+        terminal_width=140,
+        persist=True,
+    )
+    assert fb_line == "ogy | cache 80% | ctx 20K (10%) | $0.05 | 5h:60% | OK"

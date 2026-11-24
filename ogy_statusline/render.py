@@ -39,29 +39,128 @@ def _should_persist_snapshot(state_file: Path, debounce_s: float) -> bool:
         return False
 
 
+def _pick_int(d: dict[str, Any], *keys: str) -> int:
+    for k in keys:
+        val = d.get(k)
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
+def _pick_float(d: dict[str, Any], *keys: str) -> float:
+    for k in keys:
+        val = d.get(k)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def _read_db_fallback(db_path: Path, session_id: str) -> tuple[int, int, int, int, float, int]:
+    """Return (in_tok, cr_tok, cc_tok, ctx_used, total_usd, turn_count) from ogy.db."""
+    if not db_path.is_file():
+        return 0, 0, 0, 0, 0.0, 0
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.25)
+        try:
+            if session_id:
+                row = conn.execute(
+                    """
+                    SELECT total_input_tokens, total_cache_read_tokens, total_cache_creation_tokens,
+                           turns_cost_usd, total_cost_usd, turn_count, peak_context_tokens
+                    FROM v_session_kpis WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                trow = conn.execute(
+                    """
+                    SELECT input_tokens, cache_read_tokens, cache_creation_tokens, context_window_used
+                    FROM turns WHERE session_id = ? ORDER BY step_index DESC LIMIT 1
+                    """,
+                    (session_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT total_input_tokens, total_cache_read_tokens, total_cache_creation_tokens,
+                           turns_cost_usd, total_cost_usd, turn_count, peak_context_tokens
+                    FROM v_session_kpis ORDER BY started_at DESC LIMIT 1
+                    """
+                ).fetchone()
+                trow = None
+            if not row:
+                return 0, 0, 0, 0, 0.0, 0
+            in_tok = int(row[0] or 0)
+            cr_tok = int(row[1] or 0)
+            cc_tok = int(row[2] or 0)
+            cost_usd = float(row[4] or 0.0) or float(row[3] or 0.0)
+            turns = int(row[5] or 0)
+            ctx = int(row[6] or 0)
+            if trow:
+                last_ctx = int(trow[3] or 0) or (int(trow[0] or 0) + int(trow[1] or 0) + int(trow[2] or 0))
+                if last_ctx > 0:
+                    ctx = last_ctx
+            elif ctx == 0:
+                ctx = in_tok + cr_tok + cc_tok
+            return in_tok, cr_tok, cc_tok, ctx, cost_usd, turns
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0, 0, 0, 0, 0.0, 0
+
+
 def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = None, persist: bool = True) -> str:
     """Render a compact 1-line HUD string from statusLine JSON payload."""
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else payload
-    in_tok = int(usage.get("input_tokens") or 0)
-    cr_tok = int(usage.get("cache_read_input_tokens") or usage.get("cache_read_tokens") or 0)
-    cc_tok = int(usage.get("cache_creation_input_tokens") or usage.get("cache_creation_tokens") or 0)
+    in_tok = _pick_int(usage, "input_tokens", "inputTokens")
+    cr_tok = _pick_int(usage, "cache_read_input_tokens", "cache_read_tokens", "cacheReadInputTokens", "cacheReadTokens")
+    cc_tok = _pick_int(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cacheCreationInputTokens", "cacheCreationTokens")
 
     denom = in_tok + cr_tok + cc_tok
-    cache_ratio = (cr_tok / denom) if denom > 0 else None
-    cache_pct_str = f"{round(cache_ratio * 100)}%" if cache_ratio is not None else "--"
 
-    ctx_win = payload.get("context_window") if isinstance(payload.get("context_window"), dict) else {}
-    ctx_used = int(ctx_win.get("used") or payload.get("context_window_used") or denom)
-    ctx_max = int(ctx_win.get("max") or payload.get("context_window_max") or 200_000)
-    ctx_pct = round((ctx_used / ctx_max) * 100) if ctx_max > 0 else 0
+    ctx_win = (
+        payload.get("context_window")
+        if isinstance(payload.get("context_window"), dict)
+        else (payload.get("contextWindow") if isinstance(payload.get("contextWindow"), dict) else {})
+    )
+    ctx_used = _pick_int(ctx_win, "used", "usedTokens", "used_tokens") or _pick_int(payload, "context_window_used", "contextWindowUsed") or denom
+    ctx_max = _pick_int(ctx_win, "max", "maxTokens", "max_tokens") or _pick_int(payload, "context_window_max", "contextWindowMax") or 200_000
 
     cost_obj = payload.get("cost") if isinstance(payload.get("cost"), dict) else {}
-    total_usd = float(cost_obj.get("total_usd") or 0.0)
+    total_usd = _pick_float(cost_obj, "total_usd", "totalUsd", "total_cost_usd", "totalCostUsd") or _pick_float(payload, "total_cost_usd", "totalCostUsd", "total_usd")
 
-    idle_gap_s = float(payload.get("idle_gap_s") or 0.0)
-    turn_count = int(payload.get("turn_count") or payload.get("stepIdx") or 0)
-    exceeds_200k = bool(payload.get("exceeds_200k_tokens"))
+    idle_gap_s = _pick_float(payload, "idle_gap_s", "idleGapS")
+    turn_count = _pick_int(payload, "turn_count", "turnCount", "stepIdx")
+    exceeds_200k = bool(payload.get("exceeds_200k_tokens") or payload.get("exceeds200kTokens"))
     model_name = str(payload.get("modelName") or payload.get("model") or "gemini-4-hydrogen")
+
+    session_id = str(payload.get("conversationId") or payload.get("session_id") or payload.get("conversation_id") or "").strip()
+
+    if persist and denom == 0 and total_usd == 0.0:
+        cfg = load_config()
+        sample_path = cfg.stash_dir.parent / "statusline_sample.json"
+        if not sample_path.is_file():
+            try:
+                sample_path.parent.mkdir(parents=True, exist_ok=True)
+                sample_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except OSError:
+                pass
+        fb_in, fb_cr, fb_cc, fb_ctx, fb_cost, fb_turns = _read_db_fallback(cfg.db_path, session_id)
+        if fb_in + fb_cr + fb_cc > 0 or fb_cost > 0.0:
+            in_tok, cr_tok, cc_tok = fb_in, fb_cr, fb_cc
+            denom = in_tok + cr_tok + cc_tok
+            ctx_used = fb_ctx or denom
+            total_usd = fb_cost
+            turn_count = turn_count or fb_turns
+
+    cache_ratio = (cr_tok / denom) if denom > 0 else None
+    cache_pct_str = f"{round(cache_ratio * 100)}%" if cache_ratio is not None else "--"
+    ctx_pct = round((ctx_used / ctx_max) * 100) if ctx_max > 0 else 0
 
     health = assess_context_health(
         context_tokens=ctx_used,
@@ -82,7 +181,6 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
                 break
 
     if persist:
-        session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
         if session_id:
             cfg = load_config()
             state_file = cfg.state_dir / f"sl_{session_id}.ts"
