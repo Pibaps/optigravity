@@ -220,6 +220,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_recall.add_argument("hash", help="SHA-256 hash prefix of stashed output")
     p_recall.add_argument("--lines", default=None, help="Line range A:B (1-based inclusive)")
 
+    for tui_cmd in ("tui", "chat"):
+        p_tui = sub.add_parser(tui_cmd, help="Launch interactive V2 ACP TUI (`agy acp`)")
+        p_tui.add_argument("prompt", nargs="?", default=None, help="Optional initial prompt")
+        p_tui.add_argument("--cwd", default=".", help="Workspace directory")
+        p_tui.add_argument("--sandbox", action="store_true", help="Pass --sandbox to agy acp")
+        p_tui.add_argument("--add-dir", action="append", default=[], help="Additional directory (--add-dir)")
+        p_tui.add_argument("--agent", default=None, help="Agent profile (--agent)")
+        p_tui.add_argument("--log-file", default=None, help="ACP log file (--log-file)")
+        p_tui.add_argument("--auth-mode", default="oauth-personal", help="Auth mode (oauth-personal or api-key)")
+
+    p_eval = sub.add_parser("router-eval", help="Offline shadow evaluation of Stage 2 bandit")
+    p_eval.add_argument("--category", default=None)
+    p_eval.add_argument("--min-samples", type=int, default=5)
+    p_eval.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -263,6 +278,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         from ogy_core.firebreaks import recall_stashed_output
 
         print(recall_stashed_output(args.hash, lines_spec=args.lines))
+        return 0
+    if args.command in ("tui", "chat"):
+        from ogy_frontends.acp_tui.app import run_tui
+
+        return run_tui(
+            cwd=args.cwd,
+            sandbox=args.sandbox,
+            add_dirs=args.add_dir,
+            agent=args.agent,
+            log_file=args.log_file,
+            auth_method=args.auth_mode,
+            initial_prompt=args.prompt,
+        )
+    if args.command == "router-eval":
+        from ogy_core.router import evaluate_bandit_offline
+
+        cfg = load_config()
+        conn = connect(cfg.db_path, init_schema=True)
+        try:
+            report = evaluate_bandit_offline(conn, category=args.category, min_samples=args.min_samples)
+        finally:
+            conn.close()
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(f"Total decisions evaluated: {report['total_decisions']}")
+            for cat, info in report["categories"].items():
+                print(f"  {cat}: samples={info['samples']} best={info['best_arm']} (reward={info['best_mean_reward']})")
         return 0
 
     return 1

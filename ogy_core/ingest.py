@@ -366,3 +366,93 @@ def enrich_from_agy_dbs(
         c_conn.close()
 
     return result
+
+
+def ingest_acp_turn(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    step_index: int,
+    workspace_path: str,
+    model_id: str,
+    effort_level: str | None = None,
+    execution_mode: str | None = None,
+    input_tokens: int = 0,
+    cached_read_tokens: int = 0,
+    cached_write_tokens: int = 0,
+    output_tokens: int = 0,
+    thought_tokens: int = 0,
+    context_window_used: int | None = None,
+    context_window_max: int | None = None,
+    cost_usd: float | None = None,
+    gap_since_prev_turn_s: float | None = None,
+    enterprise_cache: bool = False,
+) -> float:
+    """Persist an ACP v1 logical turn (with exact thoughtTokens) into SQLite WAL."""
+    norm_model = normalize_model_id(model_id)
+    ensure_session(
+        conn,
+        session_id=session_id,
+        workspace_path=workspace_path,
+        surface="cli_acp",
+        initial_model=norm_model,
+        initial_effort=effort_level,
+        initial_mode=execution_mode,
+    )
+    est_cost = (
+        float(cost_usd)
+        if cost_usd is not None
+        else estimate_turn_cost(
+            norm_model,
+            input_tokens=input_tokens,
+            cache_read_tokens=cached_read_tokens,
+            cache_creation_tokens=cached_write_tokens,
+            output_tokens=output_tokens,
+            thinking_tokens=thought_tokens,
+            enterprise=enterprise_cache,
+        )
+    )
+    ctx_used = context_window_used
+    if ctx_used is None and (input_tokens + cached_read_tokens + cached_write_tokens) > 0:
+        ctx_used = input_tokens + cached_read_tokens + cached_write_tokens
+
+    upsert_turn(
+        conn,
+        session_id=session_id,
+        step_index=step_index,
+        model_id=norm_model,
+        effort_level=effort_level,
+        execution_mode=execution_mode,
+        input_tokens=input_tokens,
+        cache_read_tokens=cached_read_tokens,
+        cache_creation_tokens=cached_write_tokens,
+        output_tokens=output_tokens,
+        thinking_tokens=thought_tokens,
+        thinking_is_estimated=0,
+        context_window_used=ctx_used,
+        context_window_max=context_window_max,
+        exceeds_200k=1 if (ctx_used or 0) > 200_000 else 0,
+        gap_since_prev_turn_s=gap_since_prev_turn_s,
+        estimated_cost_usd=est_cost,
+        data_source="acp",
+    )
+    return est_cost
+
+
+def get_latest_quota_snapshots(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Return the most recent quota snapshot per bucket_id (5h / weekly) without polling agy."""
+    rows = query_all(
+        conn,
+        """
+        SELECT q.bucket_id, q.remaining_fraction, q.reset_time, q.reset_in_seconds, q.plan_tier, q.captured_at
+        FROM quota_snapshots q
+        INNER JOIN (
+            SELECT bucket_id, MAX(snapshot_id) AS max_id
+            FROM quota_snapshots
+            GROUP BY bucket_id
+        ) latest ON latest.max_id = q.snapshot_id
+        ORDER BY q.bucket_id ASC
+        """,
+    )
+    return {str(r["bucket_id"]): dict(r) for r in rows}
+

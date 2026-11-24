@@ -118,3 +118,34 @@ def assess_context_health(
         pricing_cliff_alert=pricing_cliff_alert,
         k_star_min_turns=k_star,
     )
+
+
+def write_handoff(
+    *,
+    goal: str,
+    modified_files: list[str],
+    checks: str,
+    negative_constraints: list[str],
+    next_step: str,
+    workspace_path: str | object = ".",
+) -> dict[str, object]:
+    """Generate a compact normalized .ogy/handoff.md (<= 30 lines) before /clear or V2 rotation."""
+    from pathlib import Path
+
+    target = Path(str(workspace_path)) / ".ogy" / "handoff.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    files_block = "\n".join(f"- {f}" for f in modified_files[:10]) or "- (none)"
+    neg_block = "\n".join(f"- DO NOT: {c}" for c in negative_constraints[:8]) or "- (none)"
+    content = (
+        "# Session Handoff\n"
+        f"**Goal:** {goal.strip()}\n"
+        "**Modified files:**\n"
+        f"{files_block}\n"
+        f"**Checks:** {checks.strip()}\n"
+        "**Negative constraints:**\n"
+        f"{neg_block}\n"
+        f"**Next step:** {next_step.strip()}\n"
+    )
+    target.write_text(content, encoding="utf-8")
+    return {"path": str(target), "lines": len(content.splitlines()), "content": content}
+

@@ -9,6 +9,8 @@ description = "Token efficiency, context health, routing, and telemetry companio
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=2,<3",
+    "textual>=8.0",
+    "agent-client-protocol>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +30,7 @@ packages = [
     "ogy_hooks",
     "ogy_statusline",
     "ogy_mcp",
+    "ogy_frontends",
 ]
 
 [tool.pytest.ini_options]

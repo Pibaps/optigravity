@@ -9,7 +9,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from ogy_core.config import load_config
-from ogy_core.context_health import assess_context_health
+from ogy_core.context_health import assess_context_health, write_handoff
 from ogy_core.firebreaks import recall_stashed_output
 from ogy_core.storage import connect, detect_waste, query_all
 
@@ -81,22 +81,15 @@ def ogy_write_handoff(
     workspace_path: str = ".",
 ) -> str:
     """Generate a compact normalized .ogy/handoff.md (<= 30 lines) before /clear."""
-    target = Path(workspace_path) / ".ogy" / "handoff.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    files_block = "\n".join(f"- {f}" for f in modified_files[:10]) or "- (none)"
-    neg_block = "\n".join(f"- DO NOT: {c}" for c in negative_constraints[:8]) or "- (none)"
-    content = (
-        "# Session Handoff\n"
-        f"**Goal:** {goal.strip()}\n"
-        "**Modified files:**\n"
-        f"{files_block}\n"
-        f"**Checks:** {checks.strip()}\n"
-        "**Negative constraints:**\n"
-        f"{neg_block}\n"
-        f"**Next step:** {next_step.strip()}\n"
+    res = write_handoff(
+        goal=goal,
+        modified_files=modified_files,
+        checks=checks,
+        negative_constraints=negative_constraints,
+        next_step=next_step,
+        workspace_path=workspace_path,
     )
-    target.write_text(content, encoding="utf-8")
-    return json.dumps({"path": str(target), "lines": len(content.splitlines())})
+    return json.dumps({"path": res["path"], "lines": res["lines"]})
 
 
 def main() -> None:

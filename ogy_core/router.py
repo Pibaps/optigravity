@@ -284,3 +284,65 @@ def record_routing_decision(
                 decision.predicted_score,
             ),
         )
+
+
+def evaluate_bandit_offline(
+    conn: sqlite3.Connection,
+    *,
+    category: str | None = None,
+    min_samples: int = 5,
+) -> dict[str, Any]:
+    """Offline shadow evaluation of Stage 2 bandit vs Stage 1 baseline on historical decisions."""
+    where = "WHERE rd.actual_reward IS NOT NULL"
+    params: list[Any] = []
+    if category:
+        where += " AND rd.detected_category = ?"
+        params.append(category)
+
+    rows = query_all(
+        conn,
+        f"""
+        SELECT rd.detected_category, rd.stage, rd.chosen_model, rd.chosen_effort,
+               rd.actual_reward, rd.propensity, tk.outcome
+        FROM routing_decisions rd
+        LEFT JOIN tasks tk ON tk.task_id = rd.task_id
+        {where}
+        ORDER BY rd.decision_id ASC
+        """,
+        tuple(params),
+    )
+
+    by_cat: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_cat.setdefault(r["detected_category"], []).append(dict(r))
+
+    report: dict[str, Any] = {"total_decisions": len(rows), "categories": {}}
+    for cat, items in by_cat.items():
+        if len(items) < min_samples:
+            continue
+        arms: dict[str, dict[str, float]] = {}
+        for it in items:
+            key = f"{it['chosen_model']}:{it['chosen_effort']}"
+            st = arms.setdefault(key, {"count": 0.0, "reward_sum": 0.0, "successes": 0.0})
+            st["count"] += 1.0
+            st["reward_sum"] += float(it["actual_reward"] or 0.0)
+            if it["outcome"] == "success":
+                st["successes"] += 1.0
+
+        summary = {
+            arm: {
+                "count": int(st["count"]),
+                "mean_reward": round(st["reward_sum"] / st["count"], 4),
+                "success_rate": round(st["successes"] / st["count"], 4),
+            }
+            for arm, st in arms.items()
+        }
+        best_arm = max(summary.items(), key=lambda kv: kv[1]["mean_reward"])
+        report["categories"][cat] = {
+            "samples": len(items),
+            "best_arm": best_arm[0],
+            "best_mean_reward": best_arm[1]["mean_reward"],
+            "arms": summary,
+        }
+    return report
+
