@@ -114,8 +114,48 @@ def _read_db_fallback(db_path: Path, session_id: str) -> tuple[int, int, int, in
         return 0, 0, 0, 0, 0.0, 0
 
 
+def _bar(fraction: float, width: int = 6) -> str:
+    """Render a compact Unicode progress bar (e.g. '███░░░')."""
+    clamped = max(0.0, min(1.0, fraction))
+    filled = round(clamped * width)
+    return ("█" * filled) + ("░" * (width - filled))
+
+
+def _c(text: str, code: str, *, no_color: bool) -> str:
+    if no_color or not code:
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def _pick_quota_buckets(quota: Any, model_name: str) -> tuple[float | None, float | None]:
+    """Return (5h_remaining_fraction, weekly_remaining_fraction) matching active model."""
+    if not isinstance(quota, dict):
+        return None, None
+    is_3p = any(k in model_name.lower() for k in ("claude", "gpt", "opus", "sonnet", "haiku"))
+    order_5h = ("3p-5h", "claude-5h", "gemini-5h") if is_3p else ("gemini-5h", "3p-5h", "claude-5h")
+    order_wk = ("3p-weekly", "claude-weekly", "gemini-weekly") if is_3p else ("gemini-weekly", "3p-weekly", "claude-weekly")
+
+    q5h = next(
+        (float(quota[b]["remaining_fraction"]) for b in order_5h if isinstance(quota.get(b), dict) and quota[b].get("remaining_fraction") is not None),
+        None,
+    )
+    qwk = next(
+        (float(quota[b]["remaining_fraction"]) for b in order_wk if isinstance(quota.get(b), dict) and quota[b].get("remaining_fraction") is not None),
+        None,
+    )
+    return q5h, qwk
+
+
+def _quota_color(frac: float) -> str:
+    if frac >= 0.50:
+        return "32"  # green
+    if frac >= 0.20:
+        return "33"  # yellow
+    return "31"      # red
+
+
 def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = None, persist: bool = True) -> str:
-    """Render a compact 1-line HUD string from statusLine JSON payload."""
+    """Render a compact 1-line ANSI HUD string from statusLine JSON payload."""
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else payload
     in_tok = _pick_int(usage, "input_tokens", "inputTokens")
     cr_tok = _pick_int(usage, "cache_read_input_tokens", "cache_read_tokens", "cacheReadInputTokens", "cacheReadTokens")
@@ -160,7 +200,8 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
 
     cache_ratio = (cr_tok / denom) if denom > 0 else None
     cache_pct_str = f"{round(cache_ratio * 100)}%" if cache_ratio is not None else "--"
-    ctx_pct = round((ctx_used / ctx_max) * 100) if ctx_max > 0 else 0
+    ctx_frac = (ctx_used / ctx_max) if ctx_max > 0 else 0.0
+    ctx_pct = round(ctx_frac * 100)
 
     health = assess_context_health(
         context_tokens=ctx_used,
@@ -171,14 +212,7 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
         model_id=model_name,
     )
 
-    quota_str = ""
-    quota = payload.get("quota")
-    if isinstance(quota, dict):
-        for bucket in ("gemini-5h", "claude-5h"):
-            q = quota.get(bucket)
-            if isinstance(q, dict) and q.get("remaining_fraction") is not None:
-                quota_str = f"5h:{round(float(q['remaining_fraction']) * 100)}%"
-                break
+    q5h, qwk = _pick_quota_buckets(payload.get("quota"), model_name)
 
     if persist:
         if session_id:
@@ -200,35 +234,45 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
 
     width = terminal_width or shutil.get_terminal_size((120, 24)).columns
     no_color = bool(os.environ.get("NO_COLOR"))
+    sep = _c(" │ ", "90", no_color=no_color)
 
-    zone_label = {"green": "OK", "amber": "WARN", "red": "RED"}.get(health.zone, "OK")
+    zone_label = {"green": "● OK", "amber": "▲ WARN", "red": "■ RED"}.get(health.zone, "● OK")
     if health.idle_warning and health.zone == "red":
-        zone_label = health.idle_warning
+        zone_label = f"■ {health.idle_warning}"
+    zone_code = {"green": "1;32", "amber": "1;33", "red": "1;31"}.get(health.zone, "32")
+    zone_disp = _c(zone_label, zone_code, no_color=no_color)
 
-    if not no_color:
-        color_code = {"green": "\x1b[32m", "amber": "\x1b[33m", "red": "\x1b[31m"}.get(health.zone, "")
-        reset = "\x1b[0m"
-        zone_disp = f"{color_code}{zone_label}{reset}"
-    else:
-        zone_disp = zone_label
+    brand = _c("⚡ ogy", "1;36", no_color=no_color)
+    cache_code = "90" if cache_ratio is None else ("32" if cache_ratio >= 0.70 else ("33" if cache_ratio >= 0.40 else "31"))
+    ctx_code = "32" if ctx_frac < 0.30 else ("33" if ctx_frac < 0.50 else "31")
 
-    if width < 120:
-        parts = [f"ogy", f"c:{cache_pct_str}", f"{_format_tokens(ctx_used)}", f"${total_usd:.2f}"]
-        if quota_str:
-            parts.append(quota_str)
+    if width < 115:
+        parts = [
+            brand,
+            _c(f"c:{cache_pct_str}", cache_code, no_color=no_color),
+            _c(f"{_bar(ctx_frac, 4)} {_format_tokens(ctx_used)}", ctx_code, no_color=no_color),
+            _c(f"${total_usd:.2f}", "37", no_color=no_color),
+        ]
+        if q5h is not None:
+            parts.append(_c(f"5h:{round(q5h * 100)}%", _quota_color(q5h), no_color=no_color))
+        if qwk is not None:
+            parts.append(_c(f"wk:{round(qwk * 100)}%", _quota_color(qwk), no_color=no_color))
         parts.append(zone_disp)
-        return " | ".join(parts)
+        return sep.join(parts)
 
+    turn_tag = f"t{turn_count} · " if turn_count > 0 else ""
     parts = [
-        "ogy",
-        f"cache {cache_pct_str}",
-        f"ctx {_format_tokens(ctx_used)} ({ctx_pct}%)",
-        f"${total_usd:.2f}",
+        brand,
+        f"cache {_c(cache_pct_str, cache_code, no_color=no_color)}",
+        f"ctx {_c(_bar(ctx_frac, 6), ctx_code, no_color=no_color)} {_format_tokens(ctx_used)} ({ctx_pct}%)",
+        _c(f"{turn_tag}${total_usd:.2f}", "37", no_color=no_color),
     ]
-    if quota_str:
-        parts.append(quota_str)
+    if q5h is not None:
+        parts.append(f"5h {_c(_bar(q5h, 5), _quota_color(q5h), no_color=no_color)} {round(q5h * 100)}%")
+    if qwk is not None:
+        parts.append(f"wk {_c(_bar(qwk, 5), _quota_color(qwk), no_color=no_color)} {round(qwk * 100)}%")
     parts.append(zone_disp)
-    return " | ".join(parts)
+    return sep.join(parts)
 
 
 def run_statusline_from_stdin() -> int:
