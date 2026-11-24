@@ -242,7 +242,7 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
     zone_code = {"green": "1;32", "amber": "1;33", "red": "1;31"}.get(health.zone, "32")
     zone_disp = _c(zone_label, zone_code, no_color=no_color)
 
-    brand = _c("⚡ ogy", "1;36", no_color=no_color)
+    brand = _c("ogy", "1;36", no_color=no_color)
     cache_code = "90" if cache_ratio is None else ("32" if cache_ratio >= 0.70 else ("33" if cache_ratio >= 0.40 else "31"))
     ctx_code = "32" if ctx_frac < 0.30 else ("33" if ctx_frac < 0.50 else "31")
 

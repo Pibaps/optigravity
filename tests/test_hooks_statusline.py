@@ -101,10 +101,10 @@ def test_statusline_render_wide_and_narrow(monkeypatch) -> None:
         },
     }
     wide = render_statusline(payload, terminal_width=140, persist=False)
-    assert "⚡ ogy │ cache 92% │ ctx █░░░░░ 64K (13%) │ $0.24 │ 5h ████░ 88% │ wk ████░ 72% │ ▲ WARN" == wide
+    assert "ogy │ cache 92% │ ctx █░░░░░ 64K (13%) │ $0.24 │ 5h ████░ 88% │ wk ████░ 72% │ ▲ WARN" == wide
 
     narrow = render_statusline(payload, terminal_width=90, persist=False)
-    assert narrow == "⚡ ogy │ c:92% │ █░░░ 64K │ $0.24 │ 5h:88% │ wk:72% │ ▲ WARN"
+    assert narrow == "ogy │ c:92% │ █░░░ 64K │ $0.24 │ 5h:88% │ wk:72% │ ▲ WARN"
 
 
 def test_statusline_camelcase_and_db_fallback(monkeypatch, tmp_path: Path) -> None:
@@ -121,7 +121,7 @@ def test_statusline_camelcase_and_db_fallback(monkeypatch, tmp_path: Path) -> No
         "totalCostUsd": 0.12,
     }
     line = render_statusline(camel, terminal_width=140, persist=False)
-    assert "⚡ ogy │ cache 80% │ ctx ░░░░░░ 10K (5%) │ $0.12 │ ● OK" == line
+    assert "ogy │ cache 80% │ ctx ░░░░░░ 10K (5%) │ $0.12 │ ● OK" == line
 
     # 2. DB fallback when statusLine payload omits usage/cost
     from ogy_core.storage import connect, ensure_session, upsert_turn
@@ -148,4 +148,4 @@ def test_statusline_camelcase_and_db_fallback(monkeypatch, tmp_path: Path) -> No
         terminal_width=140,
         persist=True,
     )
-    assert fb_line == "⚡ ogy │ cache 80% │ ctx █░░░░░ 20K (10%) │ t1 · $0.05 │ 5h ███░░ 60% │ ● OK"
+    assert fb_line == "ogy │ cache 80% │ ctx █░░░░░ 20K (10%) │ t1 · $0.05 │ 5h ███░░ 60% │ ● OK"
