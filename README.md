@@ -23,11 +23,11 @@ It reduces billable token usage while preserving the native `agy` TUI, OAuth quo
 
 ## 1. Requirements & Installation
 
-* **Python**: 3.12+
-* **Package manager**: [`uv`](https://docs.astral.sh/uv/)
+* **Python**: 3.12+ (Windows & Linux)
 * **Google Antigravity CLI**: `agy` installed and available on `PATH`
+* **Package installer**: [`uv`](https://docs.astral.sh/uv/) (recommended), `pipx`, or standard `pip`
 
-### Install in editable / tool mode with `uv`
+### Option A — Install with `uv` (recommended)
 
 ```bash
 # Clone the repository and sync dependencies
@@ -35,6 +35,18 @@ uv sync --all-extras
 
 # Or install globally as a uv tool (exposes ogy, ogy-hook, ogy-mcp on PATH)
 uv tool install .
+```
+
+### Option B — Install with `pipx` or `pip` (no `uv` required)
+
+```bash
+# Global tool install with pipx
+pipx install .
+
+# Or editable install in a standard venv
+python -m venv .venv
+# Windows: .venv\Scripts\activate  |  Linux: source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
 This installs three entry points:
@@ -235,6 +247,6 @@ You can also override the SQLite database location with the `OGY_DB_PATH` enviro
 
 ## 11. Troubleshooting & Safety
 
-* **Running tests**: `uv run pytest -v`
+* **Running tests**: `pytest -v` (or `uv run pytest -v`)
 * **Windows paths**: Never use `~` or single backslashes `\` inside `settings.json` or `hooks.json`; `ogy init` handles this automatically.
 * **Firebreaks disabled by default**: `ogy init` installs `ogy-firebreaks` with `"enabled": false` until you have verified `ogy doctor --probe-agy` and opt in with `ogy init --enable-firebreaks`.
