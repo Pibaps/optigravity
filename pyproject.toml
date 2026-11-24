@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "optigravity"
+version = "0.1.0"
+description = "Token efficiency, context health, routing, and telemetry companion for Google Antigravity CLI (agy)"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+ogy = "ogy_cli.main:main"
+ogy-hook = "ogy_hooks.cli:main"
+ogy-mcp = "ogy_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "ogy_core",
+    "ogy_cli",
+    "ogy_hooks",
+    "ogy_statusline",
+    "ogy_mcp",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

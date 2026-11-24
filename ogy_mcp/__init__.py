@@ -1,0 +1,1 @@
+"""Optigravity minimal MCP server."""

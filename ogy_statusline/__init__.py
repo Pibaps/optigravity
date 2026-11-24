@@ -1,0 +1,1 @@
+"""Optigravity statusline renderer."""
