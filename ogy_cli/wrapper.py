@@ -51,7 +51,7 @@ def build_agy_args(
         args.extend(["--model", decision.model_id])
     if decision.effort and decision.model_id.lower() != "orchestrator":
         args.extend(["--effort", decision.effort])
-    if decision.mode:
+    if decision.mode and not (headless and decision.mode == "plan" and decision.stage != "manual_override"):
         args.extend(["--mode", decision.mode])
     if sandbox:
         args.append("--sandbox")
