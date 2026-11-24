@@ -147,8 +147,11 @@ def run_agy(
         return 0
 
     if os.name == "nt":
-        proc = subprocess.run(["agy", *agy_args], env=env)
-        return int(proc.returncode)
+        try:
+            proc = subprocess.run(["agy", *agy_args], env=env)
+            return int(proc.returncode)
+        except KeyboardInterrupt:
+            return 130
 
     os.execvpe("agy", ["agy", *agy_args], env)
     return 0
