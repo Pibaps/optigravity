@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from ogy_cli.init_audit import audit_mcp_config
+from ogy_cli.wrapper import build_agy_args
 from ogy_core.router import record_routing_decision, route_stage1, route_stage2_bandit
 from ogy_core.storage import connect, ensure_session, write_tx
 from ogy_mcp.server import ogy_session_budget, ogy_write_handoff
@@ -103,3 +104,7 @@ def test_mcp_tools_and_audit(tmp_path: Path, monkeypatch) -> None:
     )
     assert len(audit["findings"]) == 1
     assert audit["recommended_profile"]["bloated"]["enabledTools"] == ["cli_tool"]
+
+    dec = route_stage1("Fix typo in README")
+    assert build_agy_args(dec, prompt="Fix typo")[-2:] == ["-i", "Fix typo"]
+    assert build_agy_args(dec, prompt="Fix typo", headless=True)[-2:] == ["-p", "Fix typo"]

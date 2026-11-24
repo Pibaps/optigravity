@@ -189,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--model", default=None)
     p_run.add_argument("--effort", default=None)
     p_run.add_argument("--mode", default=None)
+    p_run.add_argument("-p", "--print", dest="headless", action="store_true", help="Non-interactive print mode (-p)")
     p_run.add_argument("--sandbox", action="store_true")
     p_run.add_argument("--dry-run", action="store_true")
 
@@ -232,6 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             effort=args.effort,
             mode=args.mode,
+            headless=args.headless,
             sandbox=args.sandbox,
             dry_run=args.dry_run,
             extra_args=unknown,

@@ -41,6 +41,7 @@ def build_agy_args(
     decision: RouteDecision,
     *,
     prompt: str | None = None,
+    headless: bool = False,
     sandbox: bool = False,
     extra_args: Sequence[str] = (),
 ) -> list[str]:
@@ -56,7 +57,7 @@ def build_agy_args(
         args.append("--sandbox")
     args.extend(extra_args)
     if prompt:
-        args.append(prompt)
+        args.extend(["-p" if headless else "-i", prompt])
     return args
 
 
@@ -66,6 +67,7 @@ def run_agy(
     model: str | None = None,
     effort: str | None = None,
     mode: str | None = None,
+    headless: bool = False,
     sandbox: bool = False,
     dry_run: bool = False,
     extra_args: Sequence[str] = (),
@@ -119,6 +121,7 @@ def run_agy(
     agy_args = build_agy_args(
         decision,
         prompt=prompt,
+        headless=headless,
         sandbox=sandbox,
         extra_args=extra_args,
     )
