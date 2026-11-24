@@ -167,7 +167,8 @@ CREATE INDEX IF NOT EXISTS idx_turns_session_time ON turns(session_id, created_a
 CREATE INDEX IF NOT EXISTS idx_tool_calls_hash ON tool_calls(session_id, tool_name, args_hash);
 CREATE INDEX IF NOT EXISTS idx_quota_bucket_time ON quota_snapshots(bucket_id, captured_at);
 
-CREATE VIEW IF NOT EXISTS v_session_kpis AS
+DROP VIEW IF EXISTS v_session_kpis;
+CREATE VIEW v_session_kpis AS
 SELECT
   s.session_id,
   s.root_session_id,
