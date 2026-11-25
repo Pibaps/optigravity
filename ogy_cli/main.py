@@ -229,6 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
         p_tui.add_argument("--agent", default=None, help="Agent profile (--agent)")
         p_tui.add_argument("--log-file", default=None, help="ACP log file (--log-file)")
         p_tui.add_argument("--auth-mode", default="oauth-personal", help="Auth mode (oauth-personal or api-key)")
+        p_tui.add_argument("--model", default=None, help="Pin initial model (disables 1st-prompt auto-routing)")
+        p_tui.add_argument("--effort", default=None, help="Pin initial effort (disables 1st-prompt auto-routing)")
+        p_tui.add_argument("--lang", default="fr", choices=["fr", "en"], help="TUI language (fr or en)")
 
     p_eval = sub.add_parser("router-eval", help="Offline shadow evaluation of Stage 2 bandit")
     p_eval.add_argument("--category", default=None)
@@ -290,6 +293,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             log_file=args.log_file,
             auth_method=args.auth_mode,
             initial_prompt=args.prompt,
+            model=args.model,
+            effort=args.effort,
+            lang=args.lang,
         )
     if args.command == "router-eval":
         from ogy_core.router import evaluate_bandit_offline

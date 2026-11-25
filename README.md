@@ -99,6 +99,9 @@ Launches the interactive Textual TUI backed by `agy acp` (ACP v1 JSON-RPC 2.0 ov
 * `--agent <name>` — Agent profile (`--agent`)
 * `--log-file <path>` — ACP debug log file (`--log-file`)
 * `--auth-mode <mode>` — Auth mode (`oauth-personal` default, or `api-key`)
+* `--model <slug>` — Pin initial model (skips 1st-prompt Stage 1 auto-routing)
+* `--effort <level>` — Pin initial effort (`low`, `medium`, `high`, `xhigh`, `max`)
+* `--lang <fr|en>` — Interface language (`fr` default, or `en`; switchable live via `/lang`)
 
 ### `ogy doctor [--probe-agy]`
 Checks local paths, configuration, and SQLite WAL database health. With `--probe-agy`, runs Phase 0 probes against your local `agy` binary (`--version`, `--help`, `models`, `mcp list`, read-only DB inspection, and `python -S` cold-start benchmark).
@@ -146,18 +149,25 @@ Retrieves raw stashed output saved by `ogy wrap` from `~/.cache/optigravity/stas
 `ogy tui` (or `ogy chat`) connects directly to `agy acp` over JSON-RPC 2.0 (`stdio`), reusing `ogy_core` in memory while keeping `ogy-hook` / `ogy statusline` 100 % stdlib.
 
 ### Key Capabilities
-* **Live Telemetry Sidebar**: Displays `thoughtTokens` in real time, `input` / `cached_read` / `output` tokens, cache hit %, idle gap, a visual **Context Rot** bar (`GREEN` / `AMBER` / `RED`), estimated USD cost, and the latest cached `5h / 7j` quotas from `ogy.db` (never polls `agy -p /usage` in a loop).
-* **Streaming & Collapsible Thoughts**: Renders assistant responses in streaming Markdown, keeps `agent_thought_chunk` blocks collapsible, and shows live tool call cards (`running` / `completed` / `failed`).
-* **Concurrent Steering & Safe Cancel**: Submitting a new prompt while a turn is active steers the agent in flight; pressing `Ctrl+C` sends `session/cancel` without killing the `agy acp` process (`Ctrl+Q` quits).
+* **Pro Dark Graphite UI & Clean Stream**: Sober graphite theme without heavy chat boxes — user prompts, tool calls (`●` / `✓` / `✗`), collapsible reasoning (`agent_thought_chunk`), and notices use minimal left-accent strips.
+* **Live Telemetry Sidebar with Gauges**: Smooth progress gauges for **Contexte**, **Cache prompt**, and **each quota bucket on its own line** (`Gemini (5h)`, `Gemini (7j)`, `Tiers / Claude (5h)` for `3p-5h`, `Tiers / Claude (7j)` for `3p-weekly`), alongside `Raisonnement` (`thoughtTokens`), `Entrée / Sortie`, `Coût estimé`, `Inactivité`, and `Échecs outils`.
+* **Slash Autocomplete & Full `Ctrl+P` Command Palette**: Typing `/` opens a live completion popup (`Tab` / `↑` / `↓` / click) that completes both commands and arguments (`/model`, `/effort`, `/mode`, `/resume`). Pressing `Ctrl+P` exposes all Optigravity commands, models, efforts, modes, rotation, glossary, and active proposals directly.
+* **Built-in Glossary (`F1` / `/glossary`)**: Explains every Optigravity term (`SAIN` / `keep_warm`, `ATTENTION` / `frugal_btw`, `SATURÉ` / `clear_handoff`, `3p` = Third-Party/Claude quotas, `Switch Tax`, `Idle Gap` 180s TTL).
+* **Concurrent Steering & Safe Cancel**: Submitting a new prompt while a turn is active steers the agent in flight; pressing `Ctrl+C` sends `session/cancel` without killing the `agy acp` process (`Ctrl+Q` quits cleanly and closes `agy acp`).
 * **Interactive Permissions Modal**: Handles `session/request_permission` (`allow_once`, `allow_always`, `reject_once`) with Optigravity firebreak reminders.
 
 ### Slash Commands & Shortcuts
-* `/model <slug>` — Switch model via `session/set_config_option`
-* `/effort <low|medium|high|xhigh|max>` — Adjust `thinking_level` dynamically
-* `/mode <default|accept-edits|auto|plan>` — Change execution mode (`yolo` is rejected)
+* `/model [slug]` — Switch model via `session/set_config_option` (or list current & available models when omitted)
+* `/effort [low|medium|high|xhigh|max]` — Adjust `thinking_level` / `thought_level` dynamically
+* `/mode [default|accept-edits|auto|plan]` — Change execution mode (`yolo` is rejected)
+* `/btw <question>` — Ask a concise side question without modifying files or derailing the active task
+* `/lang [fr|en]` — Switch the TUI language live between French (`fr`) and English (`en`)
 * `/rotate` (or `/clear`, `Ctrl+R`) — Clean multi-session rotation: writes `.ogy/handoff.md`, closes the saturated session, opens a fresh session, and injects the handoff
 * `/handoff` — Write `.ogy/handoff.md` (`<= 30` lines) without closing the session
 * `/new` (`Ctrl+N`), `/sessions`, `/resume <session_id>` — Multi-session management via `session/resume`
+* `/glossary` (`F1`), `/help` — Open the interactive glossary modal or print slash command help
+* `Ctrl+P` — Open the full Optigravity Command Palette
+* `Ctrl+B` — Toggle the telemetry sidebar
 
 ### Assisted Orchestration & Cache Preservation
 * **Switch Tax & `> 60K` Delegation Rule**: After `>= 2` consecutive tool failures on a low/medium profile, `ogy tui` calculates the prefix cache invalidation cost (**Switch Tax**). At `<= 60K` context tokens, it proposes an upgrade (`[U]`); above `60K` tokens, it proposes delegating the blocking sub-problem to a strong subagent (`[D]`) so the parent prefix cache stays intact.

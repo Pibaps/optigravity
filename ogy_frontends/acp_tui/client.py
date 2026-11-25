@@ -182,6 +182,38 @@ def _parse_config_options(options: Any) -> dict[str, str]:
     return resolved
 
 
+def _parse_config_choices(options: Any) -> dict[str, list[str]]:
+    """Extract selectable values for each ACP SessionConfigOption when advertised."""
+    choices: dict[str, list[str]] = {}
+    if not options:
+        return choices
+    for opt in options:
+        opt_id = getattr(opt, "id", None) or (opt.get("id") if isinstance(opt, dict) else None)
+        if not opt_id:
+            continue
+        raw_opts = getattr(opt, "options", None)
+        if raw_opts is None and isinstance(opt, dict):
+            raw_opts = opt.get("options")
+        values: list[str] = []
+        if isinstance(raw_opts, list):
+            for entry in raw_opts:
+                nested = getattr(entry, "options", None)
+                if nested is None and isinstance(entry, dict):
+                    nested = entry.get("options")
+                if isinstance(nested, list):
+                    for sub in nested:
+                        v = getattr(sub, "value", None) or (sub.get("value") if isinstance(sub, dict) else None)
+                        if v is not None and str(v) not in values:
+                            values.append(str(v))
+                else:
+                    v = getattr(entry, "value", None) or (entry.get("value") if isinstance(entry, dict) else None)
+                    if v is not None and str(v) not in values:
+                        values.append(str(v))
+        if values:
+            choices[str(opt_id)] = values
+    return choices
+
+
 class _BridgeClient(acp.Client):
     """Internal `acp.Client` implementation forwarding callbacks to `AcpClient`."""
 
@@ -234,9 +266,22 @@ class AcpClient:
         self.supports_fork: bool = False
         self.active_session_id: str | None = None
         self.session_configs: dict[str, dict[str, str]] = {}
+        self.session_config_choices: dict[str, dict[str, list[str]]] = {}
         self.session_steps: dict[str, int] = {}
         self._last_turn_ts: dict[str, float] = {}
         self._tool_call_names: dict[str, str] = {}
+
+    def get_config_choices(self, config_id: str, session_id: str | None = None) -> list[str]:
+        """Return advertised selectable values for a config option (if known)."""
+        sid = session_id or self.active_session_id
+        if not sid:
+            return []
+        choices = self.session_config_choices.get(sid, {})
+        if config_id in choices:
+            return list(choices[config_id])
+        if config_id == "thinking_level" and "thought_level" in choices:
+            return list(choices["thought_level"])
+        return []
 
     @property
     def is_connected(self) -> bool:
@@ -339,7 +384,11 @@ class AcpClient:
                 raise
         sid = str(resp.session_id)
         self.active_session_id = sid
-        self.session_configs[sid] = _parse_config_options(getattr(resp, "config_options", None))
+        raw_opts = getattr(resp, "config_options", None)
+        self.session_configs[sid] = _parse_config_options(raw_opts)
+        parsed_choices = _parse_config_choices(raw_opts)
+        if parsed_choices:
+            self.session_config_choices[sid] = parsed_choices
         self.session_steps.setdefault(sid, 0)
         if self.session_configs[sid]:
             await self._emit(ConfigUpdateEvent(sid, dict(self.session_configs[sid])))
@@ -365,7 +414,11 @@ class AcpClient:
         target_cwd = str(Path(cwd or self.config.cwd).resolve())
         resp = await self._conn.resume_session(session_id=session_id, cwd=target_cwd)
         self.active_session_id = session_id
-        cfg = _parse_config_options(getattr(resp, "config_options", None))
+        raw_opts = getattr(resp, "config_options", None)
+        cfg = _parse_config_options(raw_opts)
+        parsed_choices = _parse_config_choices(raw_opts)
+        if parsed_choices:
+            self.session_config_choices[session_id] = parsed_choices
         if cfg:
             self.session_configs[session_id] = cfg
             await self._emit(ConfigUpdateEvent(session_id, dict(cfg)))
@@ -508,7 +561,11 @@ class AcpClient:
                 )
             )
         elif kind == "config_option_update":
-            cfg = _parse_config_options(getattr(update, "config_options", None))
+            raw_opts = getattr(update, "config_options", None)
+            cfg = _parse_config_options(raw_opts)
+            parsed_choices = _parse_config_choices(raw_opts)
+            if parsed_choices:
+                self.session_config_choices[session_id] = parsed_choices
             self.session_configs[session_id] = cfg
             await self._emit(ConfigUpdateEvent(session_id, dict(cfg)))
 
