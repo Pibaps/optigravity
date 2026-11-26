@@ -47,6 +47,9 @@ packages = [
     "ogy_frontends",
 ]
 
+[tool.hatch.build.targets.wheel.force-include]
+"templates" = "ogy_cli/templates"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

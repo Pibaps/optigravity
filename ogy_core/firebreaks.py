@@ -789,15 +789,16 @@ def run_wrapped_command(cmd: Sequence[str], *, stash_dir: Path | None = None) ->
         print("[ogy wrap] No command provided.", file=sys.stderr)
         return 2
 
+    resolved_cmd = [shutil.which(cmd[0]) or cmd[0], *cmd[1:]]
     cmd_str = " ".join(cmd)
     if EXCLUDED_MUTATING_RE.search(cmd_str):
-        proc = subprocess.run(list(cmd))
+        proc = subprocess.run(resolved_cmd)
         return int(proc.returncode)
 
     t0 = time.monotonic()
     try:
         proc = subprocess.Popen(
-            list(cmd),
+            resolved_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )

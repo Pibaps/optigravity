@@ -525,8 +525,9 @@ def create_mcp_server(service: SubagentsService | None = None) -> Any:
         from mcp.types import ToolAnnotations
     except ImportError as exc:
         raise RuntimeError(
-            'Missing optional MCP dependency (`mcp>=2,<3`). '
-            'Install with: uv tool install "optigravity[subagents]"'
+            "Missing optional MCP dependency (`mcp>=2,<3`). "
+            'Install from the repository root with: pip install ".[subagents]" '
+            '(or: uv tool install --reinstall ".[subagents]")'
         ) from exc
 
     svc = service or SubagentsService()

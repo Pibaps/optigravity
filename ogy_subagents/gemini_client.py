@@ -117,8 +117,9 @@ def create_genai_client(api_key: str) -> Any:
         from google import genai  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError(
-            'Missing optional dependency `google-genai`. '
-            'Install with: uv tool install "optigravity[subagents]"'
+            "Missing optional dependency `google-genai`. "
+            'Install from the repository root with: pip install ".[subagents]" '
+            '(or: uv tool install --reinstall ".[subagents]")'
         ) from exc
     return genai.Client(api_key=api_key)
 

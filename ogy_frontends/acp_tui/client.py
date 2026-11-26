@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
@@ -356,10 +357,11 @@ class AcpClient:
             env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
             args = build_agy_acp_args(self.config)
             bridge = _BridgeClient(self)
+            agy_bin = shutil.which(self.config.agy_bin) or self.config.agy_bin
             conn, proc = await self._exit_stack.enter_async_context(
                 acp.spawn_agent_process(
                     bridge,
-                    self.config.agy_bin,
+                    agy_bin,
                     *args,
                     env=env,
                     cwd=self.config.cwd,

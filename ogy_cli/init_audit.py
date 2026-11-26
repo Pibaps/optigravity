@@ -17,6 +17,9 @@ _PLAINTEXT_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{35}")
 
 
 def _templates_dir() -> Path:
+    packaged = Path(__file__).resolve().parent / "templates"
+    if packaged.is_dir():
+        return packaged
     return Path(__file__).resolve().parent.parent / "templates"
 
 

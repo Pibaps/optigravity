@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Sequence
@@ -169,12 +171,16 @@ def run_agy(
     except OSError:
         pass
 
+    agy_bin = shutil.which("agy") or "agy"
     if os.name == "nt":
         try:
-            proc = subprocess.run(["agy", *agy_args], env=env)
+            proc = subprocess.run([agy_bin, *agy_args], env=env)
             return int(proc.returncode)
+        except FileNotFoundError:
+            print("[ogy run] `agy` executable not found in PATH.", file=sys.stderr)
+            return 127
         except KeyboardInterrupt:
             return 130
 
-    os.execvpe("agy", ["agy", *agy_args], env)
+    os.execvpe(agy_bin, [agy_bin, *agy_args], env)
     return 0

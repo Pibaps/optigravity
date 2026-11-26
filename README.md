@@ -26,20 +26,76 @@ It reduces billable token usage while preserving the native `agy` TUI, OAuth quo
 
 ## 1. Requirements & Installation
 
-* **Python**: 3.12+ (Windows, macOS & Linux)
+* **Python**: 3.12+ (Windows & Linux/macOS)
 * **Google Antigravity CLI**: `agy` installed and available on `PATH`
-* **Package installer**: [`uv`](https://docs.astral.sh/uv/) (recommended), `pipx`, or standard `pip`
+* **Installer**: standard `pip`, `pipx`, or [`uv`](https://docs.astral.sh/uv/) — **`uv` is NOT required** (all extras including `ogy tui` work with `pip`, `pipx`, and `uv`).
 
-Optigravity uses **modular PEP 621 packaging** so the base V1 CLI, hooks, and statusline require **zero third-party dependencies** (`100%` Python stdlib, `< 20 ms` hot path):
+> [!IMPORTANT]
+> Because `agy` invokes `ogy-hook`, `ogy-mcp`, and `ogy-subagents` in the background, those executables must be on your `PATH`. Installing as a global tool (`uv tool install`, `pipx install`, or `pip install --user`) is recommended so everything works from any directory or terminal.
 
-| Target | Command | Included Capabilities |
+### Clone & Install (Recommended: Full Suite `[all]` or `[tui]`)
+
+```bash
+git clone https://github.com/Pibaps/optigravity.git
+cd optigravity
+```
+
+#### Option A — Standard `pip` (no `uv` needed)
+
+* **Linux / macOS**:
+  ```bash
+  python3 -m pip install --user ".[all]"   # or ".[tui]" for CLI + TUI only
+  ```
+  *(If your distro raises PEP 668 `externally-managed-environment`, use Option B (`pipx`), Option C (`uv`), or a virtualenv `.venv` whose `bin/` is added to `PATH`.)*
+* **Windows (PowerShell / CMD)**:
+  ```powershell
+  py -3.12 -m pip install --user ".[all]"   # or python -m pip install --user ".[all]"
+  ```
+  *(Ensure Python's `Scripts` directory is in your `PATH`, e.g. `%APPDATA%\Python\Python312\Scripts`, then open a new terminal.)*
+
+#### Option B — `pipx` (isolated global install)
+
+```bash
+pipx install ".[all]"
+pipx ensurepath
+```
+
+#### Option C — `uv` (fast isolated global install)
+
+```bash
+uv tool install ".[all]"
+uv tool update-shell   # ensures ~/.local/bin (Linux) or %USERPROFILE%\.local\bin (Windows) is on PATH
+```
+*(If you previously installed Base `.` and want to add `[tui]` or `[all]` later, pass `--reinstall`: `uv tool install --reinstall ".[all]"`.)*
+
+#### Option D — Local Virtualenv (Development / Editable)
+
+* **Linux / macOS**:
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -e ".[all,dev]"
+  ```
+* **Windows (PowerShell)**:
+  ```powershell
+  py -3.12 -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  pip install -e ".[all,dev]"
+  ```
+*(Or with `uv`: `uv sync --all-extras` and run commands via `uv run ogy ...`.)*
+
+### Modular Extras (`PEP 621`)
+
+The base V1 CLI, hooks, and statusline require **zero third-party dependencies** (`100%` Python stdlib, `< 20 ms` hot path). Pick only what you need:
+
+| Target | `pip` / `uv` / `pipx` Extra | Included Capabilities |
 | :--- | :--- | :--- |
-| **Base (V1 stdlib)** | `uv tool install .` or `pip install .` | `ogy run`, `ogy-hook`, `statusline`, `wrap`/`raw`/`recall`, `init`/`uninstall`/`doctor`/`config`, `stats`/`waste` |
-| **Interactive TUI** | `uv tool install ".[tui]"` | Adds `ogy tui` / `ogy chat` (`textual>=8.0`, `agent-client-protocol>=1.0`) |
-| **Minimal MCP** | `uv tool install ".[mcp]"` | Adds `ogy-mcp` (`mcp>=2,<3`) |
-| **Hybrid Subagents** | `uv tool install ".[subagents]"` | Adds `ogy-subagents` (`google-genai[aiohttp]`, `mcp>=2,<3`, `keyring`) |
-| **Full Suite** | `uv tool install ".[all]"` | Everything (`mcp` + `tui` + `subagents`) |
-| **Development** | `uv sync --all-extras` | Full suite + `pytest` & `pytest-asyncio` |
+| **Base (V1 stdlib)** | `.` | `ogy run`, `ogy-hook`, `statusline`, `wrap`/`raw`/`recall`, `init`/`uninstall`/`doctor`/`config`, `stats`/`waste` |
+| **Interactive TUI** | `".[tui]"` | Adds `ogy tui` / `ogy chat` (`textual>=8.0`, `agent-client-protocol>=1.0`) |
+| **Minimal MCP** | `".[mcp]"` | Adds `ogy-mcp` (`mcp>=2,<3`) |
+| **Hybrid Subagents** | `".[subagents]"` | Adds `ogy-subagents` (`google-genai[aiohttp]`, `mcp>=2,<3`, `keyring`) |
+| **Full Suite** | `".[all]"` | Everything (`mcp` + `tui` + `subagents`) |
+| **Development** | `".[all,dev]"` (or `uv sync --all-extras`) | Full suite + `pytest` & `pytest-asyncio` |
 
 This installs four entry points:
 * `ogy` — Main user CLI (lazy-loads optional extras with clear install hints)

@@ -24,9 +24,10 @@ from ogy_core.storage import CURRENT_SCHEMA_VERSION, connect, connect_readonly, 
 
 
 def _run_probe_cmd(cmd: list[str], *, env: dict[str, str] | None = None, timeout: float = 8.0) -> tuple[int, str, str]:
+    resolved_cmd = [shutil.which(cmd[0]) or cmd[0], *cmd[1:]] if cmd else cmd
     try:
         res = subprocess.run(
-            cmd,
+            resolved_cmd,
             env=env,
             capture_output=True,
             text=True,
@@ -533,7 +534,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("[ogy raw] No command provided.", file=sys.stderr)
             return 2
         try:
-            proc = subprocess.run(cmd)
+            resolved_cmd = [shutil.which(cmd[0]) or cmd[0], *cmd[1:]]
+            proc = subprocess.run(resolved_cmd)
             return int(proc.returncode)
         except FileNotFoundError:
             print(f"[ogy raw] Command not found: {cmd[0]}", file=sys.stderr)
@@ -549,7 +551,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ImportError as exc:
             print(
                 f"Missing optional TUI dependency ({exc.name or exc}).\n"
-                'Install with: uv tool install "optigravity[tui]"  (or: pip install "optigravity[tui]")',
+                "Install from the repository root with:\n"
+                '  pip install ".[tui]"                  (or: pip install ".[all]")\n'
+                '  uv tool install --reinstall ".[tui]"  (if using uv)\n'
+                '  pipx install --force ".[tui]"         (if using pipx)',
                 file=sys.stderr,
             )
             return 1

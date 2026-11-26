@@ -11,8 +11,9 @@ try:
     from mcp.server.mcpserver import MCPServer
 except ImportError as _exc:
     print(
-        f'Missing optional MCP dependency ({_exc.name or _exc}).\n'
-        'Install with: uv tool install "optigravity[mcp]"  (or: pip install "optigravity[mcp]")',
+        f"Missing optional MCP dependency ({_exc.name or _exc}).\n"
+        "Install from the repository root with:\n"
+        '  pip install ".[mcp]"  (or: uv tool install --reinstall ".[mcp]" / pipx install --force ".[mcp]")',
         file=sys.stderr,
     )
     raise SystemExit(1) from _exc
