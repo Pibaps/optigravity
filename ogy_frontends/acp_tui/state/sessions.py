@@ -98,6 +98,56 @@ def load_sessions_meta_readonly(db_path: Path, limit: int = 50) -> dict[str, dic
         return {}
 
 
+def _local_transcript_path(db_path: Path, session_id: str) -> Path:
+    safe_sid = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in session_id).strip("_") or "session"
+    return db_path.parent / "transcripts" / f"{safe_sid[:120]}.jsonl"
+
+
+def append_local_transcript_entry(db_path: Path, session_id: str, role: str, text: str) -> None:
+    """Append a single transcript entry (`user` | `assistant` | `thought`) to the local JSONL cache."""
+    if not session_id or not text.strip():
+        return
+    try:
+        path = _local_transcript_path(db_path, session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import json
+
+        line = json.dumps({"role": role, "text": text}, ensure_ascii=False)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+
+
+def load_local_transcript_entries(db_path: Path, session_id: str) -> list[dict[str, str]]:
+    """Load cached transcript entries for `session_id` (used as fallback when ACP doesn't replay history)."""
+    if not session_id:
+        return []
+    path = _local_transcript_path(db_path, session_id)
+    if not path.is_file():
+        return []
+    import json
+
+    entries: list[dict[str, str]] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                role = str(obj.get("role") or "")
+                text = str(obj.get("text") or "")
+                if role in ("user", "assistant", "thought") and text:
+                    entries.append({"role": role, "text": text})
+    except Exception:
+        return []
+    return entries
+
+
 class SessionRegistry:
     """Tracks isolated per-session telemetry state, routing flags, and pending prompt queues."""
 

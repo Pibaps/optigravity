@@ -678,3 +678,164 @@ def test_multi_session_isolation_new_rotate_and_resume(
             assert not any(p.kind == "switch_to_v1_run" for p in app.active_proposals)
 
     asyncio.run(_run())
+
+
+def test_scrollbar_syncs_position_and_streamed_file_links_no_readme_linkify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from textual.widgets import Markdown
+    from ogy_frontends.acp_tui.widgets.transcript import create_safe_markdown_parser
+
+    monkeypatch.setenv("OGY_DB_PATH", str(tmp_path / "ogy.db"))
+    fake = FakeAgentConn()
+    app = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake,
+    )
+
+    async def _run() -> None:
+        async with app.run_test(size=(100, 20)) as pilot:
+            await pilot.pause(0.15)
+            tr = app.get_active_transcript()
+            assert tr is not None
+
+            # 1. Stream file links split across tiny 3-char chunks + plain README.md
+            full_text = (
+                "Voir [install.ps1](file:///C:/Users/pbapi/My%20Projects/install.ps1) et "
+                "[README.md](file:///C:/Users/pbapi/README.md#L97-L109).\n\n"
+                "Consultez aussi README.md, app.py et [Docs](https://example.com).\n\n"
+                "```md\n[keep.py](file:///C:/Users/pbapi/keep.py)\n```\n\n"
+                + "\n".join(f"Paragraph line {i}" for i in range(45))
+            )
+            for idx in range(0, len(full_text), 3):
+                await app._on_acp_event(AgentMessageEvent("acp-sess-1", full_text[idx : idx + 3]))
+            await tr.close_active_message()
+            await pilot.pause(0.1)
+
+            msg = tr.query_one(AssistantMessage)
+            md_widget = msg.query_one(Markdown)
+            assert "`install.ps1`" in md_widget.source
+            assert "`README.md:97-109`" in md_widget.source
+            assert "file:///C:/Users/pbapi/My%20Projects/install.ps1" not in md_widget.source
+            assert "[keep.py](file:///C:/Users/pbapi/keep.py)" in md_widget.source
+
+            # Safe parser must NOT auto-linkify README.md or app.py into http://README.md
+            tokens = create_safe_markdown_parser().parse(md_widget.source)
+            hrefs = [
+                tok.attrs.get("href")
+                for parent in tokens
+                for tok in (parent.children or [])
+                if tok.type == "link_open"
+            ]
+            assert "https://example.com" in hrefs
+            assert not any("README.md" in str(h) or "app.py" in str(h) for h in hrefs)
+
+            # 2. Scrollbar position stays in sync when scroll_y changes (super().watch_scroll_y)
+            assert tr.max_scroll_y > 0
+            tr.scroll_y = 0
+            await pilot.pause(0.05)
+            assert tr.vertical_scrollbar.position == 0
+            mid = max(1, int(tr.max_scroll_y // 2))
+            tr.scroll_y = mid
+            await pilot.pause(0.05)
+            assert tr.vertical_scrollbar.position == mid
+
+    asyncio.run(_run())
+
+
+def test_resume_existing_session_restores_history_via_acp_load_and_local_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+    from ogy_frontends.acp_tui.state.sessions import append_local_transcript_entry
+
+    db_path = tmp_path / "ogy.db"
+    monkeypatch.setenv("OGY_DB_PATH", str(db_path))
+
+    # --- Path A: ACP server advertises loadSession=True and replays history ---
+    class LoadableAgentConn(FakeAgentConn):
+        def __init__(self) -> None:
+            super().__init__()
+            self.client_ref = None
+
+        async def initialize(self, **kwargs):
+            self.calls.append(("initialize", kwargs))
+            return SimpleNamespace(
+                protocol_version=1,
+                agent_capabilities={"load_session": True, "session": {"fork": True}},
+            )
+
+        async def load_session(self, **kwargs):
+            self.calls.append(("load_session", kwargs))
+            sid = kwargs["session_id"]
+            assert self.client_ref is not None
+            await self.client_ref._handle_session_update(
+                sid,
+                SimpleNamespace(
+                    session_update="user_message_chunk",
+                    content=SimpleNamespace(text="Old user prompt from ACP"),
+                    message_id="u1",
+                ),
+            )
+            await self.client_ref._handle_session_update(
+                sid,
+                SimpleNamespace(
+                    session_update="agent_message_chunk",
+                    content=SimpleNamespace(text="Old assistant answer from ACP"),
+                    message_id="a1",
+                ),
+            )
+            return SimpleNamespace(config_options=[SimpleNamespace(id="model", current_value="gemini-4-neon")])
+
+    fake_load = LoadableAgentConn()
+    app1 = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake_load,
+    )
+    fake_load.client_ref = app1.client
+
+    async def _run_acp_load() -> None:
+        async with app1.run_test() as pilot:
+            await pilot.pause(0.15)
+            assert app1.client.supports_load is True
+            await app1._resume_session_by_id("existing-acp-session-42")
+            await pilot.pause(0.1)
+
+            assert any(name == "load_session" for name, _ in fake_load.calls)
+            tr = app1._transcripts["existing-acp-session-42"]
+            user_texts = [str(w.render()) for w in tr.query(".user-msg")]
+            assert any("Old user prompt from ACP" in txt for txt in user_texts)
+            msgs = list(tr.query(AssistantMessage))
+            assert any("Old assistant answer from ACP" in m.raw_markdown for m in msgs)
+            assert not app1.query_one("#activity-bar", Static).has_class("visible")
+
+    asyncio.run(_run_acp_load())
+
+    # --- Path B: Server does NOT support loadSession -> local JSONL cache fallback ---
+    append_local_transcript_entry(db_path, "cached-session-99", "user", "Cached prompt from previous run")
+    append_local_transcript_entry(db_path, "cached-session-99", "assistant", "Cached answer from previous run")
+
+    fake_no_load = FakeAgentConn()
+    app2 = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake_no_load,
+    )
+
+    async def _run_local_cache() -> None:
+        async with app2.run_test() as pilot:
+            await pilot.pause(0.15)
+            assert app2.client.supports_load is False
+            await app2._resume_session_by_id("cached-session-99")
+            await pilot.pause(0.1)
+
+            tr = app2._transcripts["cached-session-99"]
+            user_texts = [str(w.render()) for w in tr.query(".user-msg")]
+            assert any("Cached prompt from previous run" in txt for txt in user_texts)
+            msgs = list(tr.query(AssistantMessage))
+            assert any("Cached answer from previous run" in m.raw_markdown for m in msgs)
+
+    asyncio.run(_run_local_cache())
+

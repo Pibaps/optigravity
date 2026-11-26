@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import difflib
 import json
 import re
 import time
 from typing import Any
 
+from markdown_it import MarkdownIt
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -21,15 +23,21 @@ from ogy_frontends.acp_tui.i18n import t
 
 MAX_MARKDOWN_STREAM_CHARS = 200_000
 INLINE_DIFF_MAX_CHANGED_LINES = 25
+_LINK_BUF_MAX_CHARS = 512
 
 _FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
-_FILE_LINK_RE = re.compile(r"\[([^\]]+)\]\(file://([^)\s]+)\)")
+_FILE_LINK_RE = re.compile(r"\[([^\]]+)\]\(<?file://([^)>\n]+)>?\)")
 _LINE_ANCHOR_RE = re.compile(r"#L(\d+)(?:-L?(\d+))?$")
 
 _READ_TOOLS = frozenset({"read_file", "view_file", "view_file_outline", "view_code_item", "list_dir", "read"})
 _SEARCH_TOOLS = frozenset({"grep_search", "find_by_name", "search", "ripgrep", "glob", "search_web"})
 _FETCH_TOOLS = frozenset({"fetch", "web_fetch", "read_url_content", "http_get"})
 _EDIT_TOOLS = frozenset({"edit_file", "write_file", "write_to_file", "replace_file_content", "multi_replace_file_content", "edit", "write"})
+
+
+def create_safe_markdown_parser() -> MarkdownIt:
+    """GFM-like parser with `linkify=False` so filenames (`README.md`, `app.py`) never become clickable HTTP URLs."""
+    return MarkdownIt("gfm-like", {"linkify": False})
 
 
 def _clean_file_links(markdown_text: str) -> str:
@@ -52,6 +60,130 @@ def _clean_file_links(markdown_text: str) -> str:
     for idx in range(0, len(parts), 2):
         parts[idx] = _FILE_LINK_RE.sub(_replace_match, parts[idx])
     return "".join(parts)
+
+
+class _StreamingLinkCleaner:
+    """Incrementally cleans `[label](file:///...)` links even when split across streaming chunks."""
+
+    def __init__(self) -> None:
+        self._buf: str = ""
+        self._in_fence: bool = False
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        self._buf += chunk
+        out: list[str] = []
+
+        while self._buf:
+            # Handle fenced code block markers (` ``` `)
+            fence_idx = self._buf.find("```")
+            if self._in_fence:
+                if fence_idx != -1:
+                    out.append(self._buf[: fence_idx + 3])
+                    self._buf = self._buf[fence_idx + 3 :]
+                    self._in_fence = False
+                    continue
+                # Hold up to 2 trailing backticks in case a closing fence is split
+                hold = 2 if self._buf.endswith("``") else (1 if self._buf.endswith("`") else 0)
+                if hold:
+                    if len(self._buf) > hold:
+                        out.append(self._buf[:-hold])
+                        self._buf = self._buf[-hold:]
+                    break
+                out.append(self._buf)
+                self._buf = ""
+                break
+
+            # Outside fence: find earliest `[` or ` ``` `
+            bracket_idx = self._buf.find("[")
+            if fence_idx != -1 and (bracket_idx == -1 or fence_idx < bracket_idx):
+                out.append(self._buf[: fence_idx + 3])
+                self._buf = self._buf[fence_idx + 3 :]
+                self._in_fence = True
+                continue
+
+            if bracket_idx == -1:
+                hold = 2 if self._buf.endswith("``") else (1 if self._buf.endswith("`") else 0)
+                if hold:
+                    if len(self._buf) > hold:
+                        out.append(self._buf[:-hold])
+                        self._buf = self._buf[-hold:]
+                    break
+                out.append(self._buf)
+                self._buf = ""
+                break
+
+            # Emit safe text before `[`
+            if bracket_idx > 0:
+                out.append(self._buf[:bracket_idx])
+                self._buf = self._buf[bracket_idx:]
+
+            # Now self._buf starts with `[`
+            # Check if a newline occurred before closing `)` -> cannot be an inline file link
+            nl_idx = self._buf.find("\n")
+            close_bracket = self._buf.find("]")
+
+            if close_bracket == -1:
+                if nl_idx != -1 or len(self._buf) > _LINK_BUF_MAX_CHARS:
+                    cut = nl_idx + 1 if nl_idx != -1 else len(self._buf)
+                    out.append(self._buf[:cut])
+                    self._buf = self._buf[cut:]
+                    continue
+                break
+
+            if nl_idx != -1 and nl_idx < close_bracket:
+                out.append(self._buf[: nl_idx + 1])
+                self._buf = self._buf[nl_idx + 1 :]
+                continue
+
+            # We have `[...]` — inspect what follows `]`
+            after_idx = close_bracket + 1
+            if after_idx >= len(self._buf):
+                # Wait for next char to see if `(` follows
+                break
+
+            if self._buf[after_idx] != "(":
+                # Not a markdown link `[label](...)` — emit up to `]` and continue
+                out.append(self._buf[:after_idx])
+                self._buf = self._buf[after_idx:]
+                continue
+
+            # We have `[...](` — check if URL prefix could be `file://` or `<file://`
+            url_start = after_idx + 1
+            url_part = self._buf[url_start:]
+            prefix_ok = any(
+                url_part.startswith(p) or p.startswith(url_part)
+                for p in ("file://", "<file://")
+            )
+            if not prefix_ok:
+                # Regular link like `[Docs](https://...)` — emit `[...](` immediately
+                out.append(self._buf[:url_start])
+                self._buf = self._buf[url_start:]
+                continue
+
+            close_paren = self._buf.find(")", url_start)
+            if close_paren == -1:
+                if nl_idx != -1 or len(self._buf) > _LINK_BUF_MAX_CHARS:
+                    cut = nl_idx + 1 if nl_idx != -1 else len(self._buf)
+                    out.append(self._buf[:cut])
+                    self._buf = self._buf[cut:]
+                    continue
+                break
+
+            # Complete `[label](file://...)` candidate
+            candidate = self._buf[: close_paren + 1]
+            out.append(_clean_file_links(candidate))
+            self._buf = self._buf[close_paren + 1 :]
+
+        return "".join(out)
+
+    def flush(self) -> str:
+        if not self._buf:
+            return ""
+        rem = self._buf
+        self._buf = ""
+        return rem if self._in_fence else _clean_file_links(rem)
 
 
 def extract_diff_blocks(content: list[Any] | None, raw_input: Any = None) -> list[tuple[str, str, str]]:
@@ -149,11 +281,12 @@ class AssistantMessage(Vertical):
         self.raw_markdown: str = ""
         self._md_widget: Markdown | None = None
         self._stream: MarkdownStream | None = None
+        self._link_cleaner = _StreamingLinkCleaner()
         self._fallback_static: Static | None = None
         self._truncated: bool = False
 
     def compose(self) -> ComposeResult:
-        self._md_widget = Markdown("")
+        self._md_widget = Markdown("", parser_factory=create_safe_markdown_parser)
         yield self._md_widget
         with Horizontal(classes="msg-toolbar"):
             yield Button(t(self.lang, "copy_btn"), classes="copy-md-btn")
@@ -182,10 +315,19 @@ class AssistantMessage(Vertical):
             return
         if self._stream is None:
             self._stream = Markdown.get_stream(self._md_widget)
-        cleaned = _clean_file_links(chunk)
-        await self._stream.write(cleaned)
+        cleaned = self._link_cleaner.feed(chunk)
+        if cleaned:
+            await self._stream.write(cleaned)
 
     async def finish_stream(self) -> None:
+        tail = self._link_cleaner.flush()
+        if tail and not self._truncated and self._md_widget is not None:
+            if self._stream is None:
+                self._stream = Markdown.get_stream(self._md_widget)
+            try:
+                await self._stream.write(tail)
+            except Exception:
+                pass
         if self._stream is not None:
             stream = self._stream
             self._stream = None
@@ -390,45 +532,56 @@ class SessionTranscript(VerticalScroll):
             self.anchored = anchored
             self.has_unread = has_unread
 
-    def __init__(self, session_id: str, *, lang: str = "fr", verbosity: str = "low", id: str | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        lang: str = "fr",
+        verbosity: str = "low",
+        on_persist: Callable[[str, str, str], None] | None = None,
+        id: str | None = None,
+    ) -> None:
         super().__init__(id=id)
         self.session_id = session_id
         self.lang = lang
         self.verbosity = verbosity  # "low" | "high"
+        self._on_persist = on_persist
 
-        self._anchored: bool = True
         self._has_unread: bool = False
+        self._has_conversation_content: bool = False
         self._active_msg: AssistantMessage | None = None
+        self._active_msg_id: str | None = None
         self._active_thought: ThoughtBlock | None = None
+        self._active_user_widget: Static | None = None
+        self._active_user_text: str = ""
+        self._active_user_id: str | None = None
         self._active_group: ActivityGroup | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         self._grouped_tools: dict[str, ActivityGroup] = {}
 
     def on_mount(self) -> None:
-        self.anchor()
-        self._anchored = True
+        self.anchor(True)
 
     @property
-    def is_anchored(self) -> bool:
-        return self._anchored
+    def has_conversation_content(self) -> bool:
+        return self._has_conversation_content
 
     def pin_to_bottom(self) -> None:
         """Re-enable smart scroll anchor and jump to bottom (e.g. End key or pill click)."""
-        self._anchored = True
         self._has_unread = False
-        self.scroll_end(animate=False)
-        self.anchor()
+        self._anchor_released = False
+        self.anchor(True)
         self.post_message(self.ScrollAnchorChanged(self.session_id, True, False))
 
     def detach_anchor(self) -> None:
         """Release smart scroll anchor when user scrolls up manually (0 scroll hijacking)."""
-        if self._anchored:
-            self._anchored = False
+        if self.is_anchored:
             self.release_anchor()
+            self.anchor(False)
             self.post_message(self.ScrollAnchorChanged(self.session_id, False, self._has_unread))
 
     def _mark_new_content(self) -> None:
-        if not self._anchored:
+        if not self.is_anchored:
             self._has_unread = True
             self.post_message(self.ScrollAnchorChanged(self.session_id, False, True))
 
@@ -444,24 +597,41 @@ class SessionTranscript(VerticalScroll):
             event.stop()
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
         if new_value < old_value and not self.is_vertical_scroll_end:
             self.detach_anchor()
-        elif self.is_vertical_scroll_end and not self._anchored:
-            self._anchored = True
+        elif self.is_vertical_scroll_end and not self.is_anchored:
             self._has_unread = False
-            self.anchor()
+            self._anchor_released = False
+            self.anchor(True)
             self.post_message(self.ScrollAnchorChanged(self.session_id, True, False))
+
+    def _notify_persist(self, role: str, text: str) -> None:
+        if self._on_persist is not None and text.strip():
+            self._on_persist(self.session_id, role, text)
 
     async def close_active_message(self) -> None:
         if self._active_msg is not None:
             msg = self._active_msg
             self._active_msg = None
+            self._active_msg_id = None
             await msg.finish_stream()
+            self._notify_persist("assistant", msg.raw_markdown)
 
     def close_active_thought(self) -> None:
         if self._active_thought is not None:
-            self._active_thought.auto_collapse()
+            tb = self._active_thought
             self._active_thought = None
+            tb.auto_collapse()
+            self._notify_persist("thought", tb.raw_text)
+
+    def close_active_user_message(self) -> None:
+        if self._active_user_widget is not None:
+            text = self._active_user_text
+            self._active_user_widget = None
+            self._active_user_text = ""
+            self._active_user_id = None
+            self._notify_persist("user", text)
 
     def _close_activity_group(self) -> None:
         self._active_group = None
@@ -469,13 +639,40 @@ class SessionTranscript(VerticalScroll):
     async def append_user_message(self, display_text: str) -> None:
         await self.close_active_message()
         self.close_active_thought()
+        self.close_active_user_message()
         self._close_activity_group()
+        self._has_conversation_content = True
         await self.mount(Static(f"› {display_text}", classes="user-msg", markup=False))
+        self._notify_persist("user", display_text)
+        self._mark_new_content()
+
+    async def append_user_chunk(self, text: str, *, message_id: str | None = None) -> None:
+        """Append a streamed user message chunk (used during ACP `session/load` history replay)."""
+        await self.close_active_message()
+        self.close_active_thought()
+        self._close_activity_group()
+        if (
+            self._active_user_widget is not None
+            and message_id is not None
+            and self._active_user_id is not None
+            and message_id != self._active_user_id
+        ):
+            self.close_active_user_message()
+        self._has_conversation_content = True
+        if self._active_user_widget is None:
+            self._active_user_text = text
+            self._active_user_id = message_id
+            self._active_user_widget = Static(f"› {self._active_user_text}", classes="user-msg", markup=False)
+            await self.mount(self._active_user_widget)
+        else:
+            self._active_user_text += text
+            self._active_user_widget.update(f"› {self._active_user_text}")
         self._mark_new_content()
 
     async def append_notice(self, message: str, *, level: str = "info") -> None:
         await self.close_active_message()
         self.close_active_thought()
+        self.close_active_user_message()
         self._close_activity_group()
         css_cls = "notice-line"
         if level == "warn":
@@ -485,19 +682,31 @@ class SessionTranscript(VerticalScroll):
         await self.mount(Static(f"ogy · {message}", classes=css_cls, markup=False))
         self._mark_new_content()
 
-    async def append_assistant_chunk(self, text: str) -> None:
+    async def append_assistant_chunk(self, text: str, *, message_id: str | None = None) -> None:
         self.close_active_thought()
+        self.close_active_user_message()
         self._close_activity_group()
+        if (
+            self._active_msg is not None
+            and message_id is not None
+            and self._active_msg_id is not None
+            and message_id != self._active_msg_id
+        ):
+            await self.close_active_message()
+        self._has_conversation_content = True
         if self._active_msg is None:
             msg = AssistantMessage(lang=self.lang)
             self._active_msg = msg
+            self._active_msg_id = message_id
             await self.mount(msg)
         await self._active_msg.append_chunk(text)
         self._mark_new_content()
 
     async def append_thought_chunk(self, text: str) -> None:
         await self.close_active_message()
+        self.close_active_user_message()
         self._close_activity_group()
+        self._has_conversation_content = True
         if self._active_thought is None:
             tb = ThoughtBlock(text, lang=self.lang)
             self._active_thought = tb
@@ -509,6 +718,8 @@ class SessionTranscript(VerticalScroll):
     async def handle_tool_call(self, event: ToolCallEvent) -> None:
         await self.close_active_message()
         self.close_active_thought()
+        self.close_active_user_message()
+        self._has_conversation_content = True
 
         is_failed = event.is_error or event.status in ("failed", "error")
         explore_kind = classify_exploration_kind(event)

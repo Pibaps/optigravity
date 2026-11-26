@@ -54,6 +54,13 @@ class AcpClientConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class UserMessageEvent:
+    session_id: str
+    text: str
+    message_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AgentMessageEvent:
     session_id: str
     text: str
@@ -142,7 +149,8 @@ class SessionNoticeEvent:
 
 
 AcpEvent = (
-    AgentMessageEvent
+    UserMessageEvent
+    | AgentMessageEvent
     | AgentThoughtEvent
     | ToolCallEvent
     | UsageEvent
@@ -317,12 +325,14 @@ class AcpClient:
 
         self.server_capabilities: dict[str, Any] = {}
         self.supports_fork: bool = False
+        self.supports_load: bool = False
         self.active_session_id: str | None = None
         self.session_configs: dict[str, dict[str, str]] = {}
         self.session_config_choices: dict[str, dict[str, list[str]]] = {}
         self.session_steps: dict[str, int] = {}
         self._last_turn_ts: dict[str, float] = {}
         self._tool_call_names: dict[str, str] = {}
+        self._replaying_sessions: set[str] = set()
 
     def get_config_choices(self, config_id: str, session_id: str | None = None) -> list[str]:
         """Return advertised selectable values for a config option (if known)."""
@@ -401,8 +411,15 @@ class AcpClient:
         caps = getattr(resp, "agent_capabilities", None)
         caps_dict = caps.model_dump() if hasattr(caps, "model_dump") else (caps if isinstance(caps, dict) else {})
         self.server_capabilities = caps_dict
-        session_caps = caps_dict.get("session") if isinstance(caps_dict, dict) else None
+        session_caps = (
+            caps_dict.get("session") or caps_dict.get("session_capabilities") or caps_dict.get("sessionCapabilities")
+            if isinstance(caps_dict, dict)
+            else None
+        )
         self.supports_fork = bool(isinstance(session_caps, dict) and session_caps.get("fork"))
+        self.supports_load = bool(
+            isinstance(caps_dict, dict) and (caps_dict.get("load_session") or caps_dict.get("loadSession"))
+        )
         return caps_dict
 
     async def _authenticate_or_raise(self) -> None:
@@ -470,6 +487,26 @@ class AcpClient:
         resp = await self._conn.resume_session(session_id=session_id, cwd=target_cwd)
         self.active_session_id = session_id
         raw_opts = getattr(resp, "config_options", None)
+        cfg = _parse_config_options(raw_opts)
+        parsed_choices = _parse_config_choices(raw_opts)
+        if parsed_choices:
+            self.session_config_choices[session_id] = parsed_choices
+        if cfg:
+            self.session_configs[session_id] = cfg
+            await self._emit(ConfigUpdateEvent(session_id, dict(cfg)))
+        return session_id
+
+    async def load_session(self, session_id: str, cwd: str | None = None) -> str:
+        """Load an existing session via `session/load` so ACP replays its prior transcript history."""
+        assert self._conn is not None
+        target_cwd = str(Path(cwd or self.config.cwd).resolve())
+        self._replaying_sessions.add(session_id)
+        try:
+            resp = await self._conn.load_session(session_id=session_id, cwd=target_cwd)
+        finally:
+            self._replaying_sessions.discard(session_id)
+        self.active_session_id = session_id
+        raw_opts = getattr(resp, "config_options", None) if resp is not None else None
         cfg = _parse_config_options(raw_opts)
         parsed_choices = _parse_config_choices(raw_opts)
         if parsed_choices:
@@ -568,7 +605,11 @@ class AcpClient:
 
     async def _handle_session_update(self, session_id: str, update: Any) -> None:
         kind = getattr(update, "session_update", None)
-        if kind == "agent_message_chunk":
+        if kind == "user_message_chunk":
+            text = _extract_text_from_content(getattr(update, "content", None))
+            if text:
+                await self._emit(UserMessageEvent(session_id, text, getattr(update, "message_id", None)))
+        elif kind == "agent_message_chunk":
             text = _extract_text_from_content(getattr(update, "content", None))
             if text:
                 await self._emit(AgentMessageEvent(session_id, text, getattr(update, "message_id", None)))
@@ -611,7 +652,7 @@ class AcpClient:
                     content=content_blocks,
                 )
             )
-            if status in ("completed", "failed", "error"):
+            if status in ("completed", "failed", "error") and session_id not in self._replaying_sessions:
                 self._persist_tool_call(session_id, name, raw_in, raw_out, is_err)
         elif kind == "usage_update":
             used = int(getattr(update, "used", 0) or 0)

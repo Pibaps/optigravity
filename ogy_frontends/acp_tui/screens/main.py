@@ -32,6 +32,7 @@ from ogy_frontends.acp_tui.client import (
     SessionNoticeEvent,
     ToolCallEvent,
     UsageEvent,
+    UserMessageEvent,
 )
 from ogy_frontends.acp_tui.i18n import SUPPORTED_LANGS, t
 from ogy_frontends.acp_tui.orchestrator import ActionProposal, SessionTelemetryState
@@ -46,7 +47,9 @@ from ogy_frontends.acp_tui.screens.modals import (
 )
 from ogy_frontends.acp_tui.state.sessions import (
     TelemetrySnapshot,
+    append_local_transcript_entry,
     fetch_telemetry_snapshot,
+    load_local_transcript_entries,
     load_sessions_meta_readonly,
 )
 from ogy_frontends.acp_tui.widgets.composer import PromptComposer, PromptTextArea
@@ -185,6 +188,13 @@ class MainWorkspaceControllerMixin:
 
     async def on_unmount(self) -> None:
         self._working = False
+        for tr in list(self._transcripts.values()):
+            try:
+                await tr.close_active_message()
+                tr.close_active_thought()
+                tr.close_active_user_message()
+            except Exception:
+                pass
         for task in list(self._inflight_tasks):
             task.cancel()
         try:
@@ -238,6 +248,15 @@ class MainWorkspaceControllerMixin:
         except Exception:
             pass
 
+    def _schedule_transcript_persist(self, session_id: str, role: str, text: str) -> None:
+        if session_id in self._replaying_sessions or not text.strip():
+            return
+        self._persist_transcript_entry_worker(session_id, role, text)
+
+    @work(thread=True, group="transcript-cache-persist")
+    def _persist_transcript_entry_worker(self, session_id: str, role: str, text: str) -> None:
+        append_local_transcript_entry(self.ogy_config.db_path, session_id, role, text)
+
     # ------------------------------------------------------------------
     # Multi-session isolated SessionTranscript management
     # ------------------------------------------------------------------
@@ -250,7 +269,13 @@ class MainWorkspaceControllerMixin:
         switcher = self.query_one("#session-switcher", ContentSwitcher)
         if existing is None:
             wid = self._transcript_widget_id(session_id)
-            existing = SessionTranscript(session_id, lang=self.lang, verbosity=self.verbosity, id=wid)
+            existing = SessionTranscript(
+                session_id,
+                lang=self.lang,
+                verbosity=self.verbosity,
+                on_persist=self._schedule_transcript_persist,
+                id=wid,
+            )
             self._transcripts[session_id] = existing
             await switcher.mount(existing)
         if activate:
@@ -496,16 +521,22 @@ class MainWorkspaceControllerMixin:
     # ------------------------------------------------------------------
 
     async def _on_acp_event(self, event: AcpEvent) -> None:
-        if isinstance(event, AgentMessageEvent):
-            self._set_working(True, t(self.lang, "working_responding"))
+        replaying = getattr(event, "session_id", None) in self._replaying_sessions
+        if isinstance(event, UserMessageEvent):
             tr = await self._ensure_transcript(event.session_id)
-            await tr.append_assistant_chunk(event.text)
+            await tr.append_user_chunk(event.text, message_id=event.message_id)
+        elif isinstance(event, AgentMessageEvent):
+            if not replaying:
+                self._set_working(True, t(self.lang, "working_responding"))
+            tr = await self._ensure_transcript(event.session_id)
+            await tr.append_assistant_chunk(event.text, message_id=event.message_id)
         elif isinstance(event, AgentThoughtEvent):
-            self._set_working(True, t(self.lang, "working_thinking"))
+            if not replaying:
+                self._set_working(True, t(self.lang, "working_thinking"))
             tr = await self._ensure_transcript(event.session_id)
             await tr.append_thought_chunk(event.text)
         elif isinstance(event, ToolCallEvent):
-            await self._handle_tool_call(event)
+            await self._handle_tool_call(event, replaying=replaying)
         elif isinstance(event, UsageEvent):
             await self._handle_usage(event)
         elif isinstance(event, ConfigUpdateEvent):
@@ -543,18 +574,19 @@ class MainWorkspaceControllerMixin:
         elif isinstance(event, SessionNoticeEvent):
             await self._append_notice(event.message, session_id=event.session_id)
 
-    async def _handle_tool_call(self, event: ToolCallEvent) -> None:
+    async def _handle_tool_call(self, event: ToolCallEvent, *, replaying: bool = False) -> None:
         state = self._ensure_state(event.session_id)
-        if event.status in ("completed", "failed", "error"):
-            if event.is_error:
-                state.consecutive_failures += 1
-                state.last_error_summary = f"{event.name}: {str(event.raw_output or '')[:160]}"
+        if not replaying:
+            if event.status in ("completed", "failed", "error"):
+                if event.is_error:
+                    state.consecutive_failures += 1
+                    state.last_error_summary = f"{event.name}: {str(event.raw_output or '')[:160]}"
+                else:
+                    state.consecutive_failures = 0
+                if self._working:
+                    self._set_working(True, t(self.lang, "working_thinking"))
             else:
-                state.consecutive_failures = 0
-            if self._working:
-                self._set_working(True, t(self.lang, "working_thinking"))
-        else:
-            self._set_working(True, t(self.lang, "working_tool", name=event.name))
+                self._set_working(True, t(self.lang, "working_tool", name=event.name))
 
         if isinstance(event.raw_input, dict):
             path_val = event.raw_input.get("TargetFile") or event.raw_input.get("path")
@@ -563,7 +595,8 @@ class MainWorkspaceControllerMixin:
 
         tr = await self._ensure_transcript(event.session_id)
         await tr.handle_tool_call(event)
-        self._refresh_ui()
+        if not replaying:
+            self._refresh_ui()
 
     async def _handle_usage(self, event: UsageEvent) -> None:
         state = self._ensure_state(event.session_id)
@@ -849,9 +882,52 @@ class MainWorkspaceControllerMixin:
     async def _resume_session_by_id(self, session_id: str) -> None:
         if not self.client.is_connected:
             return
-        await self.client.resume_session(session_id)
+        existing = self._transcripts.get(session_id)
+        if existing is not None and existing.has_conversation_content:
+            await self.client.resume_session(session_id)
+            self._ensure_state(session_id, activate=True)
+            await self._ensure_transcript(session_id, activate=True)
+            self._refresh_ui()
+            await self._append_notice(t(self.lang, "session_resumed", sid=session_id[:12]), session_id=session_id)
+            return
+
+        # Opening an existing session not yet loaded in memory: prepare transcript first,
+        # replay via ACP `session/load` when supported, and fall back to local JSONL cache.
         self._ensure_state(session_id, activate=True)
-        await self._ensure_transcript(session_id, activate=True)
+        tr = await self._ensure_transcript(session_id, activate=True)
+        self._replaying_sessions.add(session_id)
+        try:
+            if self.client.supports_load:
+                try:
+                    await self.client.load_session(session_id)
+                except Exception:
+                    await self.client.resume_session(session_id)
+            else:
+                await self.client.resume_session(session_id)
+
+            await tr.close_active_message()
+            tr.close_active_thought()
+            tr.close_active_user_message()
+
+            if not tr.has_conversation_content:
+                cached = await asyncio.to_thread(load_local_transcript_entries, self.ogy_config.db_path, session_id)
+                for entry in cached:
+                    role = entry.get("role", "")
+                    text = entry.get("text", "")
+                    if not text:
+                        continue
+                    if role == "user":
+                        await tr.append_user_message(text)
+                    elif role == "thought":
+                        await tr.append_thought_chunk(text)
+                        tr.close_active_thought()
+                    elif role == "assistant":
+                        await tr.append_assistant_chunk(text)
+                        await tr.close_active_message()
+        finally:
+            self._replaying_sessions.discard(session_id)
+
+        tr.pin_to_bottom()
         self._refresh_ui()
         await self._append_notice(t(self.lang, "session_resumed", sid=session_id[:12]), session_id=session_id)
 

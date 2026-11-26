@@ -18,7 +18,11 @@ from textual.widgets.option_list import Option
 
 from ogy_frontends.acp_tui.client import ElicitationRequestEvent, PermissionRequestEvent
 from ogy_frontends.acp_tui.i18n import GLOSSARY_MARKDOWN, t
-from ogy_frontends.acp_tui.widgets.transcript import build_colored_unified_diff, extract_diff_blocks
+from ogy_frontends.acp_tui.widgets.transcript import (
+    build_colored_unified_diff,
+    create_safe_markdown_parser,
+    extract_diff_blocks,
+)
 
 _HIGH_RISK_TOOLS = frozenset({"execute", "delete", "run_command", "bash", "shell", "powershell", "rm"})
 _MED_RISK_TOOLS = frozenset({"edit", "write", "edit_file", "write_file", "write_to_file", "replace_file_content"})
@@ -523,7 +527,7 @@ class HelpGlossaryModal(ModalScreen[None]):
         md = GLOSSARY_MARKDOWN.get(self.lang, GLOSSARY_MARKDOWN["fr"])
         with Container(id="glossary-dialog"):
             with VerticalScroll(id="glossary-scroll"):
-                yield Markdown(md)
+                yield Markdown(md, parser_factory=create_safe_markdown_parser)
             with Horizontal(id="glossary-footer"):
                 yield Button(t(self.lang, "glossary_close"), id="glossary-close")
 

@@ -151,6 +151,7 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
         self.active_proposals: list[ActionProposal] = []
         self._pending_v1_proposal: ActionProposal | None = None
         self._transcripts: dict[str, SessionTranscript] = {}
+        self._replaying_sessions: set[str] = set()
         self._active_elicitations: dict[str, ElicitationModal] = {}
         self._inflight_tasks: set[asyncio.Task[Any]] = set()
         self.verbosity: str = "low"
