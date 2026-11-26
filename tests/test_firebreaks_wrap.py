@@ -14,7 +14,7 @@ from ogy_core.firebreaks import (
 from ogy_core.storage import canonical_args_hash, connect, ensure_session, upsert_tool_call
 
 
-def _make_cfg(tmp_path: Path, *, overwrite_ok: bool = False) -> OgyConfig:
+def _make_cfg(tmp_path: Path, *, overwrite_ok: bool = False, language: str = "en") -> OgyConfig:
     return OgyConfig(
         config_path=tmp_path / "config.toml",
         db_path=tmp_path / "ogy.db",
@@ -23,12 +23,14 @@ def _make_cfg(tmp_path: Path, *, overwrite_ok: bool = False) -> OgyConfig:
         stash_dir=tmp_path / "stash",
         state_dir=tmp_path / "state",
         overwrite_verified_ok=overwrite_ok,
+        language=language,
     )
 
 
 def test_firebreak_anti_loop(tmp_path: Path) -> None:
-    cfg = _make_cfg(tmp_path)
-    conn = connect(cfg.db_path, init_schema=True)
+    cfg_en = _make_cfg(tmp_path, language="en")
+    cfg_fr = _make_cfg(tmp_path, language="fr")
+    conn = connect(cfg_en.db_path, init_schema=True)
     try:
         ensure_session(conn, session_id="s1", workspace_path=str(tmp_path))
         args = {"CommandLine": "python -m unittest"}
@@ -37,11 +39,17 @@ def test_firebreak_anti_loop(tmp_path: Path) -> None:
             upsert_tool_call(
                 conn, session_id="s1", step_index=step, tool_name="run_command", args_hash=h, is_error=1
             )
-        res = evaluate_pre_tool_firebreaks(
-            conn, session_id="s1", tool_name="run_command", tool_args=args, cfg=cfg
+        res_en = evaluate_pre_tool_firebreaks(
+            conn, session_id="s1", tool_name="run_command", tool_args=args, cfg=cfg_en
         )
-        assert res["decision"] == "deny"
-        assert "Boucle" in res["reason"]
+        assert res_en["decision"] == "deny"
+        assert "loop" in res_en["reason"].lower()
+
+        res_fr = evaluate_pre_tool_firebreaks(
+            conn, session_id="s1", tool_name="run_command", tool_args=args, cfg=cfg_fr
+        )
+        assert res_fr["decision"] == "deny"
+        assert "Boucle" in res_fr["reason"]
     finally:
         conn.close()
 
@@ -99,15 +107,160 @@ def test_firebreak_wrap_and_exclusions(tmp_path: Path) -> None:
 
 def test_wrap_tee_on_failure_and_recall(tmp_path: Path, capsys) -> None:
     stash = tmp_path / "stash"
-    script = "import sys; print('\\n'.join(f'line {i}' for i in range(40))); print('FAILED test_x'); sys.exit(1)"
+    script = (
+        "import sys; "
+        "print('\\n'.join(f'line {i}' for i in range(45))); "
+        "print('FAILED test_x'); "
+        "print('STDERR boom', file=sys.stderr); "
+        "sys.exit(1)"
+    )
     rc = run_wrapped_command([sys.executable, "-c", script], stash_dir=stash)
     assert rc == 1
-    out = capsys.readouterr().out
-    assert "FAILED test_x" in out
-    assert "recall=" in out
+    captured = capsys.readouterr()
+    assert "FAILED test_x" in captured.out
+    assert "recall=" in captured.out
+    # stderr must remain separated and intact, with 0 ANSI spinner in non-TTY
+    assert "STDERR boom" in captured.err
+    assert "\x1b[" not in captured.err
 
-    logs = list(stash.glob("*.log"))
-    assert len(logs) == 1
-    digest_prefix = logs[0].stem[:12]
+    dirs = [p for p in stash.iterdir() if p.is_dir()]
+    assert len(dirs) == 1
+    assert (dirs[0] / "stdout.log").is_file()
+    assert (dirs[0] / "stderr.log").is_file()
+    assert (dirs[0] / "meta.json").is_file()
+
+    digest_prefix = dirs[0].name[:12]
     recalled = recall_stashed_output(digest_prefix, lines_spec="1:3", stash_dir=stash)
     assert recalled.splitlines() == ["line 0", "line 1", "line 2"]
+    recalled_err = recall_stashed_output(digest_prefix, stream="stderr", stash_dir=stash)
+    assert "STDERR boom" in recalled_err
+
+
+def test_lot12_zero_false_positives_and_surgical_rewrite(tmp_path: Path, monkeypatch) -> None:
+    cfg = _make_cfg(tmp_path, overwrite_ok=True)
+
+    # 1. Adaptive file thresholds: README.md (18 KB <= 48 KB) allowed; big .log (10 KB > 8 KB) denied
+    readme = tmp_path / "README.md"
+    readme.write_text("# Doc\n" * 3000, encoding="utf-8")  # ~18 KB
+    assert (
+        evaluate_pre_tool_firebreaks(None, session_id="s1", tool_name="read_file", tool_args={"Path": str(readme)}, cfg=cfg)
+        == {"decision": "allow"}
+    )
+
+    big_log = tmp_path / "server.log"
+    big_log.write_text("INFO line\n" * 1000, encoding="utf-8")  # ~10 KB > 8 KB
+    res_log = evaluate_pre_tool_firebreaks(
+        None, session_id="s1", tool_name="read_file", tool_args={"Path": str(big_log)}, cfg=cfg
+    )
+    assert res_log["decision"] == "deny"
+    assert "1000" in res_log["reason"]  # exact line count
+    assert "StartLine/EndLine" in res_log["reason"]
+    assert "grep_search" not in res_log["reason"]
+
+    # 2. Bounded-aware commands pass untouched
+    for bounded in (
+        "uv run pytest -q --tb=short",
+        "pytest -k test_foo",
+        "git log -n 10 --oneline",
+        "git diff --stat",
+        "git status -s",
+        "git status --porcelain",
+        "ogy raw -- pytest -v",
+        "OGY_NO_WRAP=1 pytest -v",
+    ):
+        assert (
+            evaluate_pre_tool_firebreaks(
+                None, session_id="s1", tool_name="run_command", tool_args={"CommandLine": bounded}, cfg=cfg
+            )
+            == {"decision": "allow"}
+        ), f"False positive on: {bounded}"
+
+    # 3. Advanced syntax & pipelines pass untouched
+    for advanced in (
+        "pytest | head -n 20",
+        "git status | Select-Object -First 5",
+        "pytest > out.log",
+        "pytest |& tee out.log",
+        "echo $(git status)",
+        "Get-ChildItem | ForEach-Object { $_.Name }",
+    ):
+        assert (
+            evaluate_pre_tool_firebreaks(
+                None, session_id="s1", tool_name="run_command", tool_args={"CommandLine": advanced}, cfg=cfg
+            )
+            == {"decision": "allow"}
+        ), f"False positive on advanced syntax: {advanced}"
+
+    # 4. Surgical compound rewrite (only unbounded verbose segment rewritten)
+    res_and = evaluate_pre_tool_firebreaks(
+        None, session_id="s1", tool_name="run_command", tool_args={"CommandLine": "pytest && ruff check"}, cfg=cfg
+    )
+    assert res_and == {"decision": "allow", "overwrite": {"CommandLine": "ogy wrap -- pytest && ruff check"}}
+
+    res_semi = evaluate_pre_tool_firebreaks(
+        None,
+        session_id="s1",
+        tool_name="run_command",
+        tool_args={"CommandLine": "git status -s; pytest -v"},
+        cfg=cfg,
+    )
+    assert res_semi == {"decision": "allow", "overwrite": {"CommandLine": "git status -s; ogy wrap -- pytest -v"}}
+
+    # 5. OGY_NO_WRAP=1 env escape hatch
+    monkeypatch.setenv("OGY_NO_WRAP", "1")
+    assert (
+        evaluate_pre_tool_firebreaks(
+            None, session_id="s1", tool_name="run_command", tool_args={"CommandLine": "pytest -v"}, cfg=cfg
+        )
+        == {"decision": "allow"}
+    )
+
+
+def test_lot13_small_passthrough_legacy_recall_and_lru_gc(tmp_path: Path, capsys) -> None:
+    import os
+    import time
+
+    from ogy_core.firebreaks import gc_stash_dir, stash_raw_output
+
+    stash = tmp_path / "stash"
+
+    # 1. Small output (<40 lines and <3KB) -> pass-through, no stash created
+    rc = run_wrapped_command([sys.executable, "-c", "print('hello'); print('world')"], stash_dir=stash)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.splitlines() == ["hello", "world"]
+    assert "[ogy wrap]" not in out
+    assert not stash.exists()
+
+    # 2. Legacy flat .log file remains readable by recall_stashed_output
+    digest = stash_raw_output("alpha\nbeta\ngamma\n", stash_dir=stash)
+    assert recall_stashed_output(digest[:10], lines_spec="2:3", stash_dir=stash) == "beta\ngamma"
+
+    # 3. LRU GC: remove expired (>7d) and evict oldest when over max_total_bytes
+    old_dir = stash / ("a" * 64)
+    old_dir.mkdir(parents=True)
+    (old_dir / "stdout.log").write_text("X" * 1024, encoding="utf-8")
+    old_ts = time.time() - (9 * 86400)
+    os.utime(old_dir, (old_ts, old_ts))
+
+    mid_dir = stash / ("b" * 64)
+    mid_dir.mkdir(parents=True)
+    (mid_dir / "stdout.log").write_text("Y" * 2048, encoding="utf-8")
+    mid_ts = time.time() - 600
+    os.utime(mid_dir, (mid_ts, mid_ts))
+
+    new_dir = stash / ("c" * 64)
+    new_dir.mkdir(parents=True)
+    (new_dir / "stdout.log").write_text("Z" * 2048, encoding="utf-8")
+
+    # Force GC with 3000-byte cap: old_dir purged by age, mid_dir evicted by LRU, new_dir kept
+    stats = gc_stash_dir(stash, max_age_days=7.0, max_total_bytes=3000, force=True)
+    assert stats["removed_count"] >= 2
+    assert not old_dir.exists()
+    assert not mid_dir.exists()
+    assert new_dir.exists()
+    assert (stash / ".last_gc").is_file()
+
+    # Subsequent non-forced GC within 1h is skipped
+    skipped = gc_stash_dir(stash, max_age_days=0.0, max_total_bytes=0, force=False)
+    assert skipped["removed_count"] == 0
