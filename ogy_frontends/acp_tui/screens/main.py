@@ -1,0 +1,1082 @@
+"""Main TUI workspace controller: multi-session ContentSwitcher, SQLite worker, ACP event routing, slash commands."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from rich.markup import escape as rich_escape
+from textual import events, work
+from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, ContentSwitcher, Footer, Header, Static
+
+from ogy_core.context_health import write_handoff
+from ogy_core.router import route_stage1
+from ogy_core.storage import connect, write_tx
+from ogy_frontends.acp_tui.client import (
+    AcpAuthError,
+    AcpEvent,
+    AgentMessageEvent,
+    AgentThoughtEvent,
+    ConfigUpdateEvent,
+    ElicitationCompleteEvent,
+    ElicitationRequestEvent,
+    PermissionRequestEvent,
+    SessionNoticeEvent,
+    ToolCallEvent,
+    UsageEvent,
+)
+from ogy_frontends.acp_tui.i18n import SUPPORTED_LANGS, t
+from ogy_frontends.acp_tui.orchestrator import ActionProposal, SessionTelemetryState
+from ogy_frontends.acp_tui.screens.modals import (
+    DelegationModal,
+    DiffPreviewModal,
+    ElicitationModal,
+    HandoffReviewModal,
+    HelpGlossaryModal,
+    PermissionModal,
+    SessionPickerModal,
+)
+from ogy_frontends.acp_tui.state.sessions import (
+    TelemetrySnapshot,
+    fetch_telemetry_snapshot,
+    load_sessions_meta_readonly,
+)
+from ogy_frontends.acp_tui.widgets.composer import PromptComposer, PromptTextArea
+from ogy_frontends.acp_tui.widgets.telemetry import TelemetryPanel, _safe_widget_id
+from ogy_frontends.acp_tui.widgets.transcript import AssistantMessage, SessionTranscript, ToolCard
+
+DEFAULT_MODELS = ["gemini-4-hydrogen", "gemini-4-neon", "gemini-4-carbon"]
+DEFAULT_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+DEFAULT_MODES = ["default", "accept-edits", "auto", "plan"]
+DEFAULT_FRUGAL_MODEL = "gemini-4-hydrogen"
+DEFAULT_FRUGAL_EFFORT = "medium"
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+@dataclass(frozen=True, slots=True)
+class SlashCommandSpec:
+    name: str
+    usage: str
+    desc_key: str
+    takes_arg: bool = False
+
+
+SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
+    SlashCommandSpec("/model", "/model <slug>", "cmd_model", True),
+    SlashCommandSpec("/effort", "/effort <level>", "cmd_effort", True),
+    SlashCommandSpec("/mode", "/mode <mode>", "cmd_mode", True),
+    SlashCommandSpec("/btw", "/btw <question>", "cmd_btw", True),
+    SlashCommandSpec("/delegate", "/delegate [question]", "cmd_delegate", True),
+    SlashCommandSpec("/lang", "/lang <fr|en>", "cmd_lang", True),
+    SlashCommandSpec("/rotate", "/rotate", "cmd_rotate"),
+    SlashCommandSpec("/handoff", "/handoff", "cmd_handoff"),
+    SlashCommandSpec("/new", "/new", "cmd_new"),
+    SlashCommandSpec("/sessions", "/sessions", "cmd_sessions"),
+    SlashCommandSpec("/resume", "/resume [id]", "cmd_resume", True),
+    SlashCommandSpec("/clear", "/clear", "cmd_clear"),
+    SlashCommandSpec("/glossary", "/glossary", "cmd_glossary"),
+    SlashCommandSpec("/help", "/help", "cmd_help"),
+)
+
+
+def _resolve_acp_model_slug(available_models: list[str], target_model: str, target_effort: str) -> str:
+    if not available_models or target_model in available_models:
+        return target_model
+    combined = f"{target_model}-{target_effort}"
+    if combined in available_models:
+        return combined
+    for candidate in available_models:
+        if candidate.startswith(f"{target_model}-"):
+            return candidate
+    return target_model
+
+
+def _detect_has_test_runner(cwd: str) -> bool:
+    root = Path(cwd)
+    return any(
+        (root / marker).exists()
+        for marker in ("pyproject.toml", "pytest.ini", "tests", "package.json", "Cargo.toml", "go.mod")
+    )
+
+
+def _build_handoff_draft(state: SessionTelemetryState, cwd: str) -> str:
+    git_short = ""
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if proc.returncode == 0:
+            git_short = proc.stdout.strip()
+    except Exception:
+        git_short = ""
+
+    lines = [
+        "# Session Handoff",
+        "",
+        f"## Goal\n{state.active_goal}",
+        "",
+        "## Modified Files",
+    ]
+    if git_short:
+        lines.append(f"```\n{git_short}\n```")
+    elif state.modified_files:
+        lines.extend(f"- {f}" for f in state.modified_files[:20])
+    else:
+        lines.append("- (none recorded)")
+
+    lines.extend(["", "## Last Error / Checks"])
+    lines.append(state.last_error_summary or "No recent tool errors.")
+    if state.consecutive_failures >= 2:
+        lines.extend(["", "## Negative Constraints", "- Do not repeat failing approach without changing strategy."])
+    lines.extend(["", "## Next Step", "Resume task cleanly from this handoff."])
+    return "\n".join(lines) + "\n"
+
+
+class MainWorkspaceControllerMixin:
+    """Mixin implementing the main TUI layout, non-blocking SQLite worker, multi-session transcripts, and actions."""
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        yield Static(t(self.lang, "connecting"), id="session-bar", markup=False)
+        with Horizontal(id="proposal-bar"):
+            yield Static("", id="proposal-text", markup=False)
+            yield Button(t(self.lang, "apply"), id="proposal-apply-btn")
+        with Horizontal(id="main-body"):
+            with Vertical(id="transcript-pane"):
+                yield ContentSwitcher(id="session-switcher")
+                yield Button(t(self.lang, "new_messages_pill"), id="new-messages-pill")
+            yield TelemetryPanel(lang=self.lang, id="telemetry-panel")
+        yield Static("", id="activity-bar", markup=False)
+        yield PromptComposer(
+            cwd=self.client_config.cwd,
+            db_path=self.ogy_config.db_path,
+            slash_provider=self.get_slash_completions,
+            enter_behavior=self.ogy_config.tui_enter_behavior,
+            lang=self.lang,
+            firebreak_limits=(
+                self.ogy_config.firebreak_file_max_bytes,
+                self.ogy_config.firebreak_doc_max_bytes,
+                self.ogy_config.firebreak_data_max_bytes,
+            ),
+            id="prompt-composer",
+        )
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.set_interval(5.0, self._schedule_telemetry_poll)
+        self.set_interval(0.12, self._tick_spinner)
+        self._schedule_telemetry_poll()
+        self.query_one("#prompt-input", PromptTextArea).focus()
+        if self.auto_connect:
+            self._boot_acp()
+
+    async def on_unmount(self) -> None:
+        self._working = False
+        for task in list(self._inflight_tasks):
+            task.cancel()
+        try:
+            await self.client.close()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Non-blocking SQLite telemetry worker (Invariant #2: 0 sync SQLite on UI thread)
+    # ------------------------------------------------------------------
+
+    def _schedule_telemetry_poll(self) -> None:
+        self._poll_telemetry_worker()
+
+    @work(thread=True, exclusive=True, group="sqlite-telemetry-poll")
+    def _poll_telemetry_worker(self) -> None:
+        snap = fetch_telemetry_snapshot(self.ogy_config.db_path, self.registry.active_session_id)
+        self.call_from_thread(self._apply_telemetry_snapshot, snap)
+
+    def _apply_telemetry_snapshot(self, snapshot: TelemetrySnapshot) -> None:
+        self.registry.update_snapshot(snapshot)
+        if self.current_state is not None:
+            self._refresh_ui()
+
+    @work(thread=True, group="routing-decision-persist")
+    def _persist_routing_decision_worker(
+        self,
+        session_id: str,
+        stage: str,
+        category: str,
+        features: dict[str, Any],
+        model: str,
+        effort: str,
+        mode: str,
+    ) -> None:
+        try:
+            conn = connect(self.ogy_config.db_path, init_schema=True)
+            try:
+                with write_tx(conn):
+                    conn.execute(
+                        """
+                        INSERT INTO routing_decisions (
+                            session_id, stage, detected_category, features_json,
+                            chosen_model, chosen_effort, chosen_mode
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (session_id, stage, category, json.dumps(features), model, effort, mode),
+                    )
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Multi-session isolated SessionTranscript management
+    # ------------------------------------------------------------------
+
+    def _transcript_widget_id(self, session_id: str) -> str:
+        return f"transcript-{_safe_widget_id(session_id)}"
+
+    async def _ensure_transcript(self, session_id: str, *, activate: bool = False) -> SessionTranscript:
+        existing = self._transcripts.get(session_id)
+        switcher = self.query_one("#session-switcher", ContentSwitcher)
+        if existing is None:
+            wid = self._transcript_widget_id(session_id)
+            existing = SessionTranscript(session_id, lang=self.lang, verbosity=self.verbosity, id=wid)
+            self._transcripts[session_id] = existing
+            await switcher.mount(existing)
+        if activate:
+            switcher.current = existing.id
+            self._update_new_messages_pill(existing.is_anchored, False)
+        return existing
+
+    def get_active_transcript(self) -> SessionTranscript | None:
+        sid = self.registry.active_session_id or self.client.active_session_id
+        if not sid:
+            return None
+        return self._transcripts.get(sid)
+
+    def _update_new_messages_pill(self, anchored: bool, has_unread: bool) -> None:
+        pill = self.query_one("#new-messages-pill", Button)
+        if not anchored and has_unread:
+            pill.add_class("visible")
+        else:
+            pill.remove_class("visible")
+
+    def on_session_transcript_scroll_anchor_changed(self, event: SessionTranscript.ScrollAnchorChanged) -> None:
+        if event.session_id == (self.registry.active_session_id or self.client.active_session_id):
+            self._update_new_messages_pill(event.anchored, event.has_unread)
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if btn_id == "new-messages-pill":
+            tr = self.get_active_transcript()
+            if tr is not None:
+                tr.pin_to_bottom()
+        elif btn_id == "proposal-apply-btn":
+            await self.action_accept_proposal()
+
+    async def on_assistant_message_copy_requested(self, event: AssistantMessage.CopyRequested) -> None:
+        try:
+            self.copy_to_clipboard(event.raw_text)
+        except Exception:
+            pass
+        await self._append_notice(t(self.lang, "copied_notice", chars=len(event.raw_text)))
+
+    def on_tool_card_fullscreen_diff_requested(self, event: ToolCard.FullscreenDiffRequested) -> None:
+        self.push_screen(DiffPreviewModal(event.title, event.diff_text, lang=self.lang))
+
+    # ------------------------------------------------------------------
+    # Working spinner & language
+    # ------------------------------------------------------------------
+
+    def _set_working(self, active: bool, label: str = "") -> None:
+        bar = self.query_one("#activity-bar", Static)
+        if active:
+            if not self._working:
+                self._working_since = time.monotonic()
+            self._working = True
+            if label:
+                self._working_label = label
+            elapsed = max(0.0, time.monotonic() - self._working_since)
+            frame = SPINNER_FRAMES[self._spinner_idx % len(SPINNER_FRAMES)]
+            bar.update(f"{frame} {self._working_label} ({elapsed:.1f}s)")
+            bar.add_class("visible")
+        else:
+            self._working = False
+            self._working_label = ""
+            bar.update("")
+            bar.remove_class("visible")
+
+    def _tick_spinner(self) -> None:
+        if not self._working or not self.is_running:
+            return
+        self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
+        elapsed = max(0.0, time.monotonic() - self._working_since)
+        frame = SPINNER_FRAMES[self._spinner_idx]
+        try:
+            self.query_one("#activity-bar", Static).update(f"{frame} {self._working_label} ({elapsed:.1f}s)")
+        except Exception:
+            self._working = False
+
+    def _apply_language(self, new_lang: str) -> None:
+        self.lang = new_lang if new_lang in SUPPORTED_LANGS else "fr"
+        self.query_one("#prompt-composer", PromptComposer).apply_lang(self.lang)
+        self.query_one("#proposal-apply-btn", Button).label = t(self.lang, "apply")
+        self.query_one("#new-messages-pill", Button).label = t(self.lang, "new_messages_pill")
+        self.query_one("#telemetry-panel", TelemetryPanel).apply_lang(self.lang)
+        for tr in self._transcripts.values():
+            tr.lang = self.lang
+        self._refresh_ui()
+
+    # ------------------------------------------------------------------
+    # ACP Boot & Routing
+    # ------------------------------------------------------------------
+
+    @work(exclusive=True)
+    async def _boot_acp(self) -> None:
+        try:
+            await self.client.connect(agent_conn=self._injected_agent_conn)
+            sid = await self.client.new_session(self.client_config.cwd)
+            self._ensure_state(sid, activate=True)
+            await self._ensure_transcript(sid, activate=True)
+            await self._apply_initial_profile(sid)
+            self._refresh_ui()
+            if self.initial_prompt:
+                await self._dispatch_prompt(self.initial_prompt)
+        except AcpAuthError as exc:
+            await self._append_notice(t(self.lang, "auth_required", err=exc), level="err")
+        except Exception as exc:
+            await self._append_notice(t(self.lang, "acp_start_failed", err=exc), level="err")
+
+    def _ensure_state(self, session_id: str, *, activate: bool = False) -> SessionTelemetryState:
+        cfg = self.client.session_configs.get(session_id, {})
+        if activate:
+            return self.registry.set_active(session_id, config_options=cfg)
+        return self.registry.ensure(session_id, config_options=cfg)
+
+    @property
+    def sessions(self) -> dict[str, SessionTelemetryState]:
+        return self.registry.sessions
+
+    @property
+    def current_state(self) -> SessionTelemetryState | None:
+        sid = self.client.active_session_id or self.registry.active_session_id
+        if not sid:
+            return None
+        return self._ensure_state(sid)
+
+    async def _set_model_and_effort(self, session_id: str, model_id: str, effort: str) -> tuple[str, str]:
+        available = self.client.get_config_choices("model", session_id)
+        resolved_model = _resolve_acp_model_slug(available, model_id, effort)
+        cfg = self.client.session_configs.get(session_id, {})
+        state = self._ensure_state(session_id)
+
+        if state.model_id != resolved_model:
+            try:
+                await self.client.set_config_option("model", resolved_model, session_id=session_id)
+            except Exception:
+                pass
+
+        opt_id = "thought_level" if ("thought_level" in cfg and "thinking_level" not in cfg) else "thinking_level"
+        if state.effort != effort:
+            try:
+                await self.client.set_config_option(opt_id, effort, session_id=session_id)
+            except Exception:
+                pass
+        return state.model_id, state.effort
+
+    async def _apply_initial_profile(self, session_id: str) -> None:
+        if self.initial_model or self.initial_effort:
+            self.registry.mark_manual_override(session_id)
+            await self._set_model_and_effort(
+                session_id,
+                self.initial_model or DEFAULT_FRUGAL_MODEL,
+                self.initial_effort or DEFAULT_FRUGAL_EFFORT,
+            )
+            return
+        await self._set_model_and_effort(session_id, DEFAULT_FRUGAL_MODEL, DEFAULT_FRUGAL_EFFORT)
+
+    async def _maybe_auto_route_first_prompt(self, session_id: str, prompt: str) -> None:
+        state = self._ensure_state(session_id)
+        if (
+            session_id in self.registry.routed_sessions
+            or session_id in self.registry.manual_override_sessions
+            or state.turn_count > 0
+            or state.context_tokens > 0
+        ):
+            return
+
+        self.registry.mark_routed(session_id)
+        decision = route_stage1(
+            prompt,
+            has_test_runner=_detect_has_test_runner(self.client_config.cwd),
+            remaining_quota_fraction=self.registry.min_quota_fraction(),
+        )
+        if self.orchestrator.check_model_compatibility(decision.model_id) is not None:
+            return
+
+        prev_model, prev_effort = state.model_id, state.effort
+        applied_model, applied_effort = await self._set_model_and_effort(
+            session_id, decision.model_id, decision.effort
+        )
+        self._refresh_ui()
+
+        if applied_model != prev_model or applied_effort != prev_effort:
+            await self._append_notice(
+                t(self.lang, "auto_routed", category=decision.category, model=applied_model, effort=applied_effort),
+                session_id=session_id,
+            )
+
+        self._persist_routing_decision_worker(
+            session_id, decision.stage, decision.category, dict(decision.features), applied_model, applied_effort, state.mode
+        )
+
+    # ------------------------------------------------------------------
+    # Dynamic config choices & slash completions
+    # ------------------------------------------------------------------
+
+    def get_available_models(self) -> list[str]:
+        advertised = self.client.get_config_choices("model")
+        return advertised if advertised else list(DEFAULT_MODELS)
+
+    def get_available_efforts(self) -> list[str]:
+        advertised = self.client.get_config_choices("thinking_level")
+        return advertised if advertised else list(DEFAULT_EFFORTS)
+
+    def get_available_modes(self) -> list[str]:
+        advertised = self.client.get_config_choices("mode")
+        if advertised:
+            return [m for m in advertised if m.lower() != "yolo"]
+        return list(DEFAULT_MODES)
+
+    def get_slash_completions(self, raw_value: str) -> list[tuple[str, str]]:
+        if not raw_value.startswith("/"):
+            return []
+        if " " not in raw_value:
+            prefix = raw_value.lower()
+            return [
+                (f"{s.name} " if s.takes_arg else s.name, f"{s.usage:<20}  {t(self.lang, s.desc_key)}")
+                for s in SLASH_COMMANDS
+                if s.name.startswith(prefix)
+            ]
+        cmd_part, arg_part = raw_value.split(" ", 1)
+        cmd = cmd_part.lower()
+        arg_prefix = arg_part.strip().lower()
+        if cmd == "/model":
+            return [(f"/model {m}", f"/model {m}") for m in self.get_available_models() if m.lower().startswith(arg_prefix)]
+        if cmd == "/effort":
+            return [(f"/effort {e}", f"/effort {e}") for e in self.get_available_efforts() if e.lower().startswith(arg_prefix)]
+        if cmd == "/mode":
+            return [(f"/mode {md}", f"/mode {md}") for md in self.get_available_modes() if md.lower().startswith(arg_prefix)]
+        if cmd == "/lang":
+            return [
+                (f"/lang {code}", f"/lang {code}  ({lbl})")
+                for code, lbl in (("fr", "Français"), ("en", "English"))
+                if code.startswith(arg_prefix)
+            ]
+        if cmd == "/resume":
+            return [
+                (f"/resume {sid}", f"/resume {sid[:12]} ({st.model_id})")
+                for sid, st in self.registry.sessions.items()
+                if sid.lower().startswith(arg_prefix)
+            ]
+        return []
+
+    # ------------------------------------------------------------------
+    # ACP Event Handlers (strictly isolated per event.session_id)
+    # ------------------------------------------------------------------
+
+    async def _on_acp_event(self, event: AcpEvent) -> None:
+        if isinstance(event, AgentMessageEvent):
+            self._set_working(True, t(self.lang, "working_responding"))
+            tr = await self._ensure_transcript(event.session_id)
+            await tr.append_assistant_chunk(event.text)
+        elif isinstance(event, AgentThoughtEvent):
+            self._set_working(True, t(self.lang, "working_thinking"))
+            tr = await self._ensure_transcript(event.session_id)
+            await tr.append_thought_chunk(event.text)
+        elif isinstance(event, ToolCallEvent):
+            await self._handle_tool_call(event)
+        elif isinstance(event, UsageEvent):
+            await self._handle_usage(event)
+        elif isinstance(event, ConfigUpdateEvent):
+            state = self._ensure_state(event.session_id)
+            if "model" in event.config_options:
+                state.model_id = event.config_options["model"]
+            if "mode" in event.config_options:
+                state.mode = event.config_options["mode"]
+            if "thinking_level" in event.config_options:
+                state.effort = event.config_options["thinking_level"]
+            elif "thought_level" in event.config_options:
+                state.effort = event.config_options["thought_level"]
+            self._refresh_ui()
+        elif isinstance(event, PermissionRequestEvent):
+            self.push_screen(
+                PermissionModal(event, lang=self.lang),
+                callback=lambda choice: event.future.done() or event.future.set_result(choice),
+            )
+        elif isinstance(event, ElicitationRequestEvent):
+            modal = ElicitationModal(event, lang=self.lang)
+            if event.elicitation_id:
+                self._active_elicitations[event.elicitation_id] = modal
+
+            def _on_elicit_done(res: dict[str, Any] | None) -> None:
+                if event.elicitation_id:
+                    self._active_elicitations.pop(event.elicitation_id, None)
+                if not event.future.done():
+                    event.future.set_result(res or {"action": "cancel"})
+
+            self.push_screen(modal, callback=_on_elicit_done)
+        elif isinstance(event, ElicitationCompleteEvent):
+            modal = self._active_elicitations.pop(event.elicitation_id, None)
+            if modal is not None and modal.is_current:
+                modal.complete_from_server()
+        elif isinstance(event, SessionNoticeEvent):
+            await self._append_notice(event.message, session_id=event.session_id)
+
+    async def _handle_tool_call(self, event: ToolCallEvent) -> None:
+        state = self._ensure_state(event.session_id)
+        if event.status in ("completed", "failed", "error"):
+            if event.is_error:
+                state.consecutive_failures += 1
+                state.last_error_summary = f"{event.name}: {str(event.raw_output or '')[:160]}"
+            else:
+                state.consecutive_failures = 0
+            if self._working:
+                self._set_working(True, t(self.lang, "working_thinking"))
+        else:
+            self._set_working(True, t(self.lang, "working_tool", name=event.name))
+
+        if isinstance(event.raw_input, dict):
+            path_val = event.raw_input.get("TargetFile") or event.raw_input.get("path")
+            if isinstance(path_val, str) and path_val not in state.modified_files:
+                state.modified_files.append(path_val)
+
+        tr = await self._ensure_transcript(event.session_id)
+        await tr.handle_tool_call(event)
+        self._refresh_ui()
+
+    async def _handle_usage(self, event: UsageEvent) -> None:
+        state = self._ensure_state(event.session_id)
+        if event.context_used is not None:
+            state.context_tokens = event.context_used
+        if event.context_max is not None:
+            state.context_max = event.context_max
+        if event.is_turn_final:
+            state.turn_count += 1
+            state.last_turn_monotonic = time.monotonic()
+            state.input_tokens += event.input_tokens
+            state.output_tokens += event.output_tokens
+            state.thought_tokens += event.thought_tokens
+            state.cached_read_tokens += event.cached_read_tokens
+            state.cached_write_tokens += event.cached_write_tokens
+            if event.cost_usd is not None:
+                state.total_cost_usd += event.cost_usd
+            tr = self._transcripts.get(event.session_id)
+            if tr is not None:
+                await tr.close_active_message()
+                tr.close_active_thought()
+            self._set_working(False)
+            self.query_one("#prompt-composer", PromptComposer).refresh_file_index()
+        elif event.cost_usd is not None:
+            state.total_cost_usd = max(state.total_cost_usd, event.cost_usd)
+        self._refresh_ui()
+
+    async def _append_notice(self, message: str, *, level: str = "info", session_id: str | None = None) -> None:
+        sid = session_id or self.client.active_session_id or self.registry.active_session_id or "default"
+        tr = await self._ensure_transcript(sid, activate=(sid == self.registry.active_session_id or not self._transcripts))
+        await tr.append_notice(message, level=level)
+
+    def _refresh_ui(self) -> None:
+        state = self.current_state
+        bar = self.query_one("#session-bar", Static)
+        prop_bar = self.query_one("#proposal-bar", Horizontal)
+        prop_text = self.query_one("#proposal-text", Static)
+        if state is None:
+            bar.update(t(self.lang, "session_none"))
+            prop_bar.remove_class("visible")
+            return
+
+        bar.update(
+            t(
+                self.lang,
+                "session_bar",
+                sid=state.session_id[:12],
+                count=len(self.registry.sessions),
+                model=state.model_id,
+                effort=state.effort,
+                mode=state.mode,
+            )
+        )
+        snap = self.registry.latest_snapshot
+        self.query_one("#telemetry-panel", TelemetryPanel).refresh_state(
+            state, snap.quotas, snap.subagent_runs, snap.subagent_summary
+        )
+
+        proposals = self.orchestrator.evaluate_proposals(state)
+        if self._pending_v1_proposal is not None:
+            proposals = [self._pending_v1_proposal] + proposals
+        self.active_proposals = proposals
+        if self.active_proposals:
+            top = self.active_proposals[0]
+            prop_text.update(f"{top.title} — {top.detail}")
+            prop_bar.add_class("visible")
+        else:
+            prop_bar.remove_class("visible")
+
+    # ------------------------------------------------------------------
+    # Composer submission & Slash Commands
+    # ------------------------------------------------------------------
+
+    async def on_prompt_composer_prompt_submitted(self, event: PromptComposer.PromptSubmitted) -> None:
+        text = event.text.strip()
+        if not text:
+            return
+        if text.startswith("/"):
+            await self._handle_slash_command(text)
+            return
+        composer = self.query_one("#prompt-composer", PromptComposer)
+        composer.persist_prompt(event.display_text, session_id=self.client.active_session_id)
+        task = asyncio.create_task(
+            self._dispatch_prompt(text, display_text=event.display_text, extra_blocks=event.extra_blocks or None)
+        )
+        self._inflight_tasks.add(task)
+        task.add_done_callback(self._inflight_tasks.discard)
+
+    async def _dispatch_prompt(
+        self,
+        text: str,
+        *,
+        display_text: str | None = None,
+        extra_blocks: list[Any] | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        sid = session_id or self.client.active_session_id or self.registry.active_session_id
+        if sid:
+            tr = await self._ensure_transcript(sid, activate=True)
+            await tr.append_user_message(display_text or text)
+
+        state = self._ensure_state(sid) if sid else self.current_state
+        if state is not None and (display_text is None or not display_text.startswith("/btw")):
+            state.active_goal = (display_text or text)[:200]
+            await self._maybe_auto_route_first_prompt(state.session_id, text)
+
+        self._set_working(True, t(self.lang, "working_sending"))
+        try:
+            await self.client.send_prompt(text, session_id=sid, extra_blocks=extra_blocks)
+        except Exception as exc:
+            await self._append_notice(t(self.lang, "prompt_error", err=exc), level="err", session_id=sid)
+        finally:
+            self._set_working(False)
+
+    def _run_palette_cmd(self, cmd_line: str) -> None:
+        task = asyncio.create_task(self._handle_slash_command(cmd_line))
+        self._inflight_tasks.add(task)
+        task.add_done_callback(self._inflight_tasks.discard)
+
+    async def _handle_slash_command(self, cmd_line: str) -> None:
+        parts = cmd_line.strip().split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        state = self.current_state
+
+        if cmd == "/help":
+            lines = "\n".join(f"  {s.usage:<20} {t(self.lang, s.desc_key)}" for s in SLASH_COMMANDS)
+            await self._append_notice(f"{t(self.lang, 'help_header')}\n{lines}")
+            return
+        if cmd == "/glossary":
+            self.action_show_glossary()
+            return
+        if cmd == "/lang":
+            if not arg or arg.lower() not in SUPPORTED_LANGS:
+                await self._append_notice(t(self.lang, "lang_status", cur=self.lang))
+                return
+            self._apply_language(arg.lower())
+            await self._append_notice(t(self.lang, "lang_changed", val=arg.lower()))
+            return
+        if cmd == "/delegate":
+            await self.action_open_delegation_modal(arg)
+            return
+        if cmd == "/btw":
+            if not arg:
+                await self._append_notice(t(self.lang, "btw_usage"))
+                return
+            wrapped = (
+                "[Side question (/btw) — answer concisely in <= 5 lines without modifying any files "
+                f"or changing the active task]: {arg}"
+            )
+            task = asyncio.create_task(self._dispatch_prompt(wrapped, display_text=f"/btw {arg}"))
+            self._inflight_tasks.add(task)
+            task.add_done_callback(self._inflight_tasks.discard)
+            return
+        if cmd == "/model":
+            if not arg:
+                cur = state.model_id if state else "--"
+                await self._append_notice(t(self.lang, "model_status", cur=cur, avail=", ".join(self.get_available_models())))
+                return
+            compat = self.orchestrator.check_model_compatibility(arg)
+            if compat is not None:
+                self._pending_v1_proposal = compat
+                self._refresh_ui()
+                await self._append_notice(f"{compat.title} : {compat.detail}", level="warn")
+                return
+            self._pending_v1_proposal = None
+            await self.client.set_config_option("model", arg)
+            if self.client.active_session_id:
+                self.registry.mark_manual_override(self.client.active_session_id)
+            self._refresh_ui()
+            await self._append_notice(t(self.lang, "model_changed", val=arg))
+            return
+        if cmd == "/effort":
+            if not arg:
+                cur = state.effort if state else "--"
+                await self._append_notice(t(self.lang, "effort_status", cur=cur, avail=", ".join(self.get_available_efforts())))
+                return
+            sid = self.client.active_session_id
+            cfg = self.client.session_configs.get(sid or "", {})
+            opt_id = "thought_level" if ("thought_level" in cfg and "thinking_level" not in cfg) else "thinking_level"
+            await self.client.set_config_option(opt_id, arg)
+            if sid:
+                self.registry.mark_manual_override(sid)
+            self._refresh_ui()
+            await self._append_notice(t(self.lang, "effort_changed", val=arg))
+            return
+        if cmd == "/mode":
+            if not arg:
+                cur = state.mode if state else "--"
+                await self._append_notice(t(self.lang, "mode_status", cur=cur, avail=", ".join(self.get_available_modes())))
+                return
+            try:
+                await self.client.set_config_option("mode", arg)
+                self._refresh_ui()
+                await self._append_notice(t(self.lang, "mode_changed", val=arg))
+            except ValueError as exc:
+                await self._append_notice(str(exc), level="warn")
+            return
+        if cmd in ("/rotate", "/clear"):
+            await self.action_open_rotation_review()
+            return
+        if cmd == "/handoff":
+            if state:
+                res = write_handoff(
+                    goal=state.active_goal,
+                    modified_files=state.modified_files,
+                    checks=state.last_error_summary or "ok",
+                    negative_constraints=[],
+                    next_step="Resume from handoff",
+                    workspace_path=self.client_config.cwd,
+                )
+                await self._append_notice(t(self.lang, "handoff_written", path=res["path"], lines=res["lines"]))
+            return
+        if cmd == "/new":
+            await self.action_new_session()
+            return
+        if cmd == "/sessions":
+            await self.action_open_session_picker()
+            return
+        if cmd == "/resume":
+            if not arg:
+                await self.action_open_session_picker()
+                return
+            await self._resume_session_by_id(arg)
+            return
+        await self._append_notice(t(self.lang, "cmd_unknown", cmd=rich_escape(cmd_line)), level="warn")
+
+    # ------------------------------------------------------------------
+    # Actions & Contextual Proposal Hotkeys ([R], [U], [D], [V])
+    # ------------------------------------------------------------------
+
+    def on_key(self, event: events.Key) -> None:
+        if isinstance(self.screen, ModalScreen):
+            return
+        # Contextual 1-key proposals when prompt input is NOT focused (or empty with banner visible)
+        if not self.active_proposals:
+            return
+        ta = self.query_one("#prompt-input", PromptTextArea)
+        if ta.has_focus and ta.text.strip():
+            return
+        key = event.key.lower()
+        for prop in self.active_proposals:
+            if prop.hotkey.lower() == key:
+                event.prevent_default()
+                event.stop()
+                task = asyncio.create_task(self._apply_proposal(prop))
+                self._inflight_tasks.add(task)
+                task.add_done_callback(self._inflight_tasks.discard)
+                return
+
+    def action_show_glossary(self) -> None:
+        if isinstance(self.screen, HelpGlossaryModal):
+            self.pop_screen()
+        else:
+            self.push_screen(HelpGlossaryModal(lang=self.lang))
+
+    def action_toggle_telemetry(self) -> None:
+        self.query_one("#telemetry-panel", TelemetryPanel).toggle_class("hidden")
+
+    def action_toggle_verbosity(self) -> None:
+        self.verbosity = "high" if self.verbosity == "low" else "low"
+        for tr in self._transcripts.values():
+            tr.set_verbosity(self.verbosity)
+        task = asyncio.create_task(self._append_notice(t(self.lang, "verbosity_notice", mode=self.verbosity)))
+        self._inflight_tasks.add(task)
+        task.add_done_callback(self._inflight_tasks.discard)
+
+    async def action_cancel_turn(self) -> None:
+        await self.client.cancel_turn()
+        self._set_working(False)
+        await self._append_notice(t(self.lang, "turn_cancelled"), level="warn")
+
+    async def action_new_session(self) -> None:
+        if not self.client.is_connected:
+            return
+        sid = await self.client.new_session(self.client_config.cwd)
+        self._ensure_state(sid, activate=True)
+        await self._ensure_transcript(sid, activate=True)
+        await self._apply_initial_profile(sid)
+        self._refresh_ui()
+        await self._append_notice(t(self.lang, "session_started", sid=sid[:12]), session_id=sid)
+
+    async def _resume_session_by_id(self, session_id: str) -> None:
+        if not self.client.is_connected:
+            return
+        await self.client.resume_session(session_id)
+        self._ensure_state(session_id, activate=True)
+        await self._ensure_transcript(session_id, activate=True)
+        self._refresh_ui()
+        await self._append_notice(t(self.lang, "session_resumed", sid=session_id[:12]), session_id=session_id)
+
+    async def action_open_session_picker(self) -> None:
+        if not self.client.is_connected:
+            return
+        try:
+            acp_sessions = await self.client.list_sessions()
+        except Exception:
+            acp_sessions = [{"session_id": sid} for sid in self.registry.sessions]
+        # Include any in-memory sessions (e.g. rotated sessions kept consultable)
+        known = {str(s.get("session_id") or "") for s in acp_sessions}
+        for sid, st in self.registry.sessions.items():
+            if sid not in known:
+                acp_sessions.append({"session_id": sid, "model": st.model_id, "title": st.active_goal})
+        db_meta = await asyncio.to_thread(load_sessions_meta_readonly, self.ogy_config.db_path)
+
+        def _on_picked(chosen_sid: str | None) -> None:
+            if chosen_sid:
+                task = asyncio.create_task(self._resume_session_by_id(chosen_sid))
+                self._inflight_tasks.add(task)
+                task.add_done_callback(self._inflight_tasks.discard)
+
+        self.push_screen(
+            SessionPickerModal(
+                acp_sessions,
+                db_meta,
+                active_session_id=self.registry.active_session_id,
+                lang=self.lang,
+            ),
+            callback=_on_picked,
+        )
+
+    def _get_configured_subagents_service(self) -> Any | None:
+        """Return injected or configured SubagentsService only if enabled and an API key is available."""
+        if getattr(self, "subagents_service", None) is not None:
+            return self.subagents_service
+        if self.ogy_config.subagents_privacy_mode == "disabled":
+            return None
+        try:
+            from ogy_subagents.secrets import resolve_api_key
+            from ogy_subagents.server import SubagentsService
+
+            tiers = ("tier1",) if self.ogy_config.subagents_privacy_mode == "tier1_only" else ("free", "tier1")
+            if any(resolve_api_key(tier).key for tier in tiers):
+                return SubagentsService(cfg=self.ogy_config)
+        except Exception:
+            return None
+        return None
+
+    async def _try_build_subagent_handoff(self, state: SessionTelemetryState) -> str | None:
+        """Optionally use Level 1 `ogy_build_handoff` when subagents are configured (instant local fallback otherwise)."""
+        svc = self._get_configured_subagents_service()
+        if svc is None:
+            return None
+        git_short = ""
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "status", "--short"],
+                cwd=self.client_config.cwd,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if proc.returncode == 0:
+                git_short = proc.stdout.strip()
+        except Exception:
+            git_short = ""
+        recent_ctx = (
+            f"Model={state.model_id}, turns={state.turn_count}, context_tokens={state.context_tokens}, "
+            f"modified_files={', '.join(state.modified_files[:20])}"
+        )
+        try:
+            text = await asyncio.wait_for(
+                svc.build_handoff(
+                    state.active_goal or "Continue active task",
+                    git_status=git_short,
+                    last_error=state.last_error_summary or "",
+                    recent_context=recent_ctx,
+                    parent_session_id=state.session_id,
+                ),
+                timeout=12.0,
+            )
+            return text.strip() if isinstance(text, str) and text.strip() else None
+        except Exception:
+            return None
+
+    async def action_open_rotation_review(self) -> None:
+        state = self.current_state
+        if state is None or not self.client.is_connected:
+            return
+        subagent_draft = await self._try_build_subagent_handoff(state)
+        if subagent_draft:
+            draft = subagent_draft
+            self._schedule_telemetry_poll()
+            await self._append_notice(t(self.lang, "handoff_subagent_used"))
+        else:
+            draft = await asyncio.to_thread(_build_handoff_draft, state, self.client_config.cwd)
+
+        def _on_confirmed(edited_handoff: str | None) -> None:
+            if edited_handoff:
+                task = asyncio.create_task(self._execute_confirmed_rotation(edited_handoff))
+                self._inflight_tasks.add(task)
+                task.add_done_callback(self._inflight_tasks.discard)
+
+        self.push_screen(HandoffReviewModal(draft, lang=self.lang), callback=_on_confirmed)
+
+    async def action_open_delegation_modal(self, initial_question: str = "") -> None:
+        """Open user-driven `[D] > 60K` delegation modal (ToS Section 6 compliant)."""
+        state = self.current_state
+        prefill = initial_question.strip() or (state.active_goal if state else "")
+
+        def _on_delegated(payload: dict[str, Any] | None) -> None:
+            if not payload:
+                return
+            mode = str(payload.get("mode") or "")
+            question = str(payload.get("question") or "").strip()
+            scope_paths = list(payload.get("scope_paths") or [])
+            if not question:
+                return
+            if mode == "insert_instruction":
+                scope_arg = f", scope_paths={json.dumps(scope_paths)}" if scope_paths else ""
+                instruction = (
+                    f"Delegate this read-only codebase research to the MCP subagent tool "
+                    f"`ogy_research_repo(question={json.dumps(question)}{scope_arg})` "
+                    f"(off OAuth quota) and use its concise sourced report before editing."
+                )
+                ta = self.query_one("#prompt-input", PromptTextArea)
+                ta.text = (ta.text.rstrip() + "\n\n" + instruction).strip() if ta.text.strip() else instruction
+                ta.focus()
+                task = asyncio.create_task(self._append_notice(t(self.lang, "delegate_inserted")))
+                self._inflight_tasks.add(task)
+                task.add_done_callback(self._inflight_tasks.discard)
+            elif mode == "run_parallel":
+                task = asyncio.create_task(self._run_parallel_delegation(question, scope_paths))
+                self._inflight_tasks.add(task)
+                task.add_done_callback(self._inflight_tasks.discard)
+
+        self.push_screen(DelegationModal(prefill, lang=self.lang), callback=_on_delegated)
+
+    async def _run_parallel_delegation(self, question: str, scope_paths: list[str]) -> None:
+        """Run read-only `ogy_research_repo` in parallel and attach its sourced report to the next prompt."""
+        svc = self._get_configured_subagents_service()
+        if svc is None:
+            await self._append_notice(
+                t(self.lang, "delegate_failed", err="No Gemini API key configured or subagents disabled."),
+                level="warn",
+            )
+            return
+        self._set_working(True, t(self.lang, "delegate_running"))
+        try:
+            sid = self.registry.active_session_id or self.client.active_session_id
+            report = await svc.research_repo(
+                question,
+                scope_paths=scope_paths or None,
+                workspace_path=self.client_config.cwd,
+                parent_session_id=sid,
+            )
+            self._schedule_telemetry_poll()
+            block = (
+                f"[Read-only subagent report (`ogy_research_repo`) for: {question}]\n"
+                f"{report}\n"
+                f"[/subagent report]"
+            )
+            ta = self.query_one("#prompt-input", PromptTextArea)
+            ta.text = (ta.text.rstrip() + "\n\n" + block).strip() if ta.text.strip() else block
+            ta.focus()
+            await self._append_notice(t(self.lang, "delegate_done", chars=len(report)))
+        except Exception as exc:
+            await self._append_notice(t(self.lang, "delegate_failed", err=exc), level="err")
+        finally:
+            self._set_working(False)
+
+    async def _execute_confirmed_rotation(self, handoff_content: str) -> None:
+        """Write handoff, open fresh isolated session (keeping old session consultable in Ctrl+S)."""
+        handoff_dir = Path(self.client_config.cwd) / ".ogy"
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        handoff_path = handoff_dir / "handoff.md"
+        await asyncio.to_thread(handoff_path.write_text, handoff_content, "utf-8")
+
+        new_sid = await self.client.new_session(self.client_config.cwd)
+        self._ensure_state(new_sid, activate=True)
+        await self._ensure_transcript(new_sid, activate=True)
+        await self._apply_initial_profile(new_sid)
+        self._refresh_ui()
+        await self._append_notice(
+            t(self.lang, "session_rotated", sid=new_sid[:12], path=str(handoff_path)),
+            session_id=new_sid,
+        )
+        await self._dispatch_prompt(f"Continue from session handoff:\n\n{handoff_content}", session_id=new_sid)
+
+    async def action_accept_rotation(self) -> None:
+        await self.action_open_rotation_review()
+
+    async def action_accept_proposal(self) -> None:
+        if not self.active_proposals:
+            return
+        await self._apply_proposal(self.active_proposals[0])
+
+    async def _apply_proposal(self, prop: ActionProposal) -> None:
+        if prop.kind == "rotate_session":
+            await self.action_open_rotation_review()
+        elif prop.kind == "upgrade_config":
+            if prop.target_model:
+                await self.client.set_config_option("model", prop.target_model)
+            if prop.target_effort:
+                sid = self.client.active_session_id
+                cfg = self.client.session_configs.get(sid or "", {})
+                opt_id = "thought_level" if ("thought_level" in cfg and "thinking_level" not in cfg) else "thinking_level"
+                await self.client.set_config_option(opt_id, prop.target_effort)
+            self._refresh_ui()
+            await self._append_notice(
+                t(self.lang, "upgrade_applied", model=prop.target_model, effort=prop.target_effort, tax=prop.switch_tax_usd)
+            )
+        elif prop.kind == "delegate_subagent":
+            await self.action_open_delegation_modal()
+        elif prop.kind == "switch_to_v1_run":
+            model = prop.target_model or "claude-5.5-sonnet"
+            cmd = f"ogy run --model {model}"
+            try:
+                self.copy_to_clipboard(cmd)
+            except Exception:
+                pass
+            self._pending_v1_proposal = None
+            self._refresh_ui()
+            await self._append_notice(t(self.lang, "v1_switch_notice", model=model), level="warn")

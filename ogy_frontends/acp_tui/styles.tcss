@@ -1,0 +1,598 @@
+/* Optigravity Phase 2 TUI Stylesheet */
+
+Screen {
+    background: #0e1116;
+    color: #e6edf3;
+}
+
+Header {
+    background: #131720;
+    color: #c9d1d9;
+    height: 1;
+    dock: top;
+}
+
+Footer {
+    background: #131720;
+    color: #8b949e;
+}
+
+#session-bar {
+    height: 2;
+    background: #121620;
+    color: #d0d7de;
+    padding: 0 2;
+    border-bottom: solid #262e3d;
+}
+
+#proposal-bar {
+    height: auto;
+    background: #231d12;
+    border-bottom: solid #523d14;
+    padding: 0 2;
+    display: none;
+    align: left middle;
+}
+
+#proposal-bar.visible {
+    display: block;
+}
+
+#proposal-text {
+    width: 1fr;
+    color: #f0c674;
+    padding: 0 1 0 0;
+}
+
+#proposal-apply-btn {
+    height: 1;
+    min-width: 12;
+    border: none;
+    background: #3b2e13;
+    color: #f0c674;
+}
+
+#main-body {
+    height: 1fr;
+}
+
+#transcript-pane {
+    width: 1fr;
+    height: 1fr;
+}
+
+#session-switcher {
+    width: 1fr;
+    height: 1fr;
+}
+
+SessionTranscript {
+    width: 1fr;
+    height: 1fr;
+    padding: 1 2;
+    background: #0e1116;
+    scrollbar-size: 1 1;
+    scrollbar-color: #2a3344;
+    scrollbar-color-hover: #485263;
+    scrollbar-background: #0e1116;
+}
+
+#new-messages-pill {
+    display: none;
+    dock: bottom;
+    height: 1;
+    width: auto;
+    margin: 0 2 1 2;
+    padding: 0 2;
+    background: #1f3558;
+    color: #e6edf3;
+    text-style: bold;
+    border: none;
+}
+
+#new-messages-pill.visible {
+    display: block;
+}
+
+/* Assistant messages & Markdown */
+AssistantMessage {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+AssistantMessage Markdown {
+    margin: 0;
+    padding: 0 1;
+    background: transparent;
+}
+
+AssistantMessage .msg-toolbar {
+    height: 1;
+    align: right middle;
+    padding: 0 1;
+}
+
+AssistantMessage .copy-md-btn {
+    height: 1;
+    min-width: 8;
+    border: none;
+    background: #18202c;
+    color: #8b949e;
+    padding: 0 1;
+}
+
+AssistantMessage .copy-md-btn:hover {
+    background: #263245;
+    color: #e6edf3;
+}
+
+.raw-text-fallback {
+    padding: 0 1;
+    color: #d0d7de;
+}
+
+.user-msg {
+    border-left: thick #6ea8fe;
+    background: #141a24;
+    color: #e6edf3;
+    padding: 0 1;
+    margin: 1 0;
+}
+
+.notice-line {
+    border-left: outer #6ea8fe;
+    background: #131720;
+    color: #c9d1d9;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+.notice-warn {
+    border-left: outer #d29922;
+    color: #e3b341;
+}
+
+.notice-err {
+    border-left: outer #f85149;
+    color: #f85149;
+}
+
+/* ThoughtBlock */
+ThoughtBlock {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0 0 1 0;
+}
+
+ThoughtBlock CollapsibleTitle {
+    color: #6e7681;
+    text-style: italic;
+    padding: 0 1;
+}
+
+ThoughtBlock .thought-body {
+    color: #8b949e;
+    text-style: dim italic;
+    padding: 0 2;
+    max-height: 4;
+}
+
+ThoughtBlock.expanded-full .thought-body {
+    max-height: 30;
+}
+
+/* ActivityGroup & ToolCard */
+ActivityGroup {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0 0 1 0;
+}
+
+ActivityGroup CollapsibleTitle {
+    color: #8b949e;
+    padding: 0 1;
+}
+
+ToolCard {
+    border: none;
+    border-left: outer #303a4b;
+    background: #11151d;
+    padding: 0;
+    margin: 0 0 1 0;
+}
+
+ToolCard.tool-running {
+    border-left: outer #6ea8fe;
+}
+
+ToolCard.tool-ok {
+    border-left: outer #3fb950;
+}
+
+ToolCard.tool-err {
+    border-left: outer #f85149;
+    background: #1d1215;
+}
+
+ToolCard CollapsibleTitle {
+    color: #c9d1d9;
+    padding: 0 1;
+}
+
+ToolCard.tool-err CollapsibleTitle {
+    color: #f85149;
+    text-style: bold;
+}
+
+ToolCard .tool-detail {
+    padding: 0 2 1 2;
+    color: #9aa4b2;
+}
+
+ToolCard .diff-summary-row {
+    height: auto;
+    padding: 0 2;
+}
+
+ToolCard .diff-fullscreen-btn {
+    height: 1;
+    min-width: 12;
+    border: none;
+    background: #1f2633;
+    color: #6ea8fe;
+    margin-left: 1;
+}
+
+/* Activity bar */
+#activity-bar {
+    display: none;
+    height: 1;
+    padding: 0 2;
+    background: #111622;
+    color: #6ea8fe;
+}
+
+#activity-bar.visible {
+    display: block;
+}
+
+/* Composer Pro */
+PromptComposer {
+    height: auto;
+    background: #0e1116;
+    border-top: solid #222936;
+}
+
+#composer-popup {
+    display: none;
+    height: auto;
+    max-height: 9;
+    margin: 0 2;
+    border: solid #2a3344;
+    background: #151922;
+    color: #c9d1d9;
+    scrollbar-size: 1 1;
+}
+
+#composer-popup.visible {
+    display: block;
+}
+
+#composer-popup-hint {
+    display: none;
+    height: 1;
+    margin: 0 2;
+    padding: 0 1;
+    color: #6e7681;
+    background: #131720;
+}
+
+#composer-popup-hint.visible {
+    display: block;
+}
+
+#reverse-search-bar {
+    display: none;
+    height: 3;
+    margin: 0 2;
+    background: #151922;
+    border: solid #6ea8fe;
+    color: #e6edf3;
+}
+
+#reverse-search-bar.visible {
+    display: block;
+}
+
+#attachment-bar {
+    display: none;
+    height: auto;
+    padding: 0 2;
+    background: #11151d;
+    color: #6ea8fe;
+}
+
+#attachment-bar.visible {
+    display: block;
+}
+
+#input-row {
+    height: auto;
+    padding: 0 2 1 2;
+    align: left bottom;
+}
+
+#prompt-input {
+    width: 1fr;
+    min-height: 3;
+    max-height: 10;
+    height: 3;
+    background: #151922;
+    border: solid #2a3344;
+    color: #e6edf3;
+}
+
+#prompt-input:focus {
+    border: solid #6ea8fe;
+}
+
+#send-btn {
+    min-width: 10;
+    height: 3;
+    margin-left: 1;
+    background: #1f2633;
+    color: #e6edf3;
+    border: solid #303a4b;
+}
+
+#send-btn:hover {
+    background: #2a3446;
+}
+
+/* Telemetry sidebar */
+TelemetryPanel {
+    width: 36;
+    border-left: solid #262e3d;
+    padding: 1 2;
+    background: #131720;
+    height: 1fr;
+    scrollbar-size: 1 1;
+    scrollbar-color: #2a3344;
+    scrollbar-color-hover: #485263;
+    scrollbar-background: #131720;
+}
+
+#telemetry-panel.hidden {
+    display: none;
+}
+
+.panel-section {
+    color: #6e7681;
+    text-style: bold;
+    margin-top: 1;
+    margin-bottom: 0;
+    border-bottom: solid #1f2633;
+}
+
+.panel-section-first {
+    margin-top: 0;
+}
+
+#tel-zone {
+    margin-top: 1;
+    text-style: bold;
+}
+
+#tel-zone-hint {
+    color: #8b949e;
+    margin-bottom: 1;
+}
+
+.zone-green { color: #3fb950; }
+.zone-amber { color: #d29922; }
+.zone-red { color: #f85149; }
+
+#quota-list {
+    height: auto;
+    margin-top: 1;
+}
+
+#quota-empty, #subagent-tree {
+    color: #8b949e;
+    margin-top: 1;
+}
+
+#tel-glossary-hint {
+    color: #6e7681;
+    margin-top: 1;
+}
+
+MetricGauge {
+    height: auto;
+    margin-bottom: 1;
+}
+
+MetricGauge .gauge-header {
+    height: 1;
+    width: 1fr;
+}
+
+MetricGauge .gauge-label {
+    width: 1fr;
+    color: #9aa4b2;
+}
+
+MetricGauge .gauge-value {
+    width: auto;
+    color: #e6edf3;
+    text-style: bold;
+}
+
+MetricGauge ProgressBar {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+}
+
+MetricGauge ProgressBar Bar {
+    width: 1fr;
+}
+
+MetricGauge ProgressBar Bar > .bar--bar,
+MetricGauge ProgressBar Bar > .bar--complete {
+    color: #3fb950;
+    background: #222936;
+}
+
+MetricGauge.gauge-warn ProgressBar Bar > .bar--bar,
+MetricGauge.gauge-warn ProgressBar Bar > .bar--complete {
+    color: #d29922;
+}
+
+MetricGauge.gauge-danger ProgressBar Bar > .bar--bar,
+MetricGauge.gauge-danger ProgressBar Bar > .bar--complete {
+    color: #f85149;
+}
+
+MetricGauge.gauge-accent ProgressBar Bar > .bar--bar,
+MetricGauge.gauge-accent ProgressBar Bar > .bar--complete {
+    color: #6ea8fe;
+}
+
+MetricGauge.gauge-muted ProgressBar Bar > .bar--bar,
+MetricGauge.gauge-muted ProgressBar Bar > .bar--complete {
+    color: #485263;
+}
+
+MetricRow {
+    height: 1;
+    width: 1fr;
+}
+
+MetricRow .metric-key {
+    width: 1fr;
+    color: #8b949e;
+}
+
+MetricRow .metric-val {
+    width: auto;
+    color: #e6edf3;
+}
+
+MetricRow.val-warn .metric-val {
+    color: #d29922;
+    text-style: bold;
+}
+
+MetricRow.val-danger .metric-val {
+    color: #f85149;
+    text-style: bold;
+}
+
+/* Modals */
+PermissionModal, ElicitationModal, HandoffReviewModal, SessionPickerModal, HelpGlossaryModal, DiffPreviewModal {
+    align: center middle;
+    background: rgba(8, 10, 14, 0.80);
+}
+
+.modal-dialog {
+    width: 84;
+    max-width: 94%;
+    max-height: 88%;
+    height: auto;
+    border: solid #303a4b;
+    background: #151922;
+    padding: 1 2;
+}
+
+.modal-title {
+    text-style: bold;
+    color: #e6edf3;
+    margin-bottom: 1;
+}
+
+.modal-scroll {
+    height: auto;
+    max-height: 24;
+    padding-right: 1;
+    scrollbar-size: 1 1;
+}
+
+.modal-buttons {
+    margin-top: 1;
+    height: auto;
+}
+
+.modal-buttons Button {
+    margin-right: 1;
+}
+
+.risk-high {
+    color: #f85149;
+    text-style: bold;
+}
+
+.risk-med {
+    color: #6ea8fe;
+    text-style: bold;
+}
+
+.risk-low {
+    color: #3fb950;
+    text-style: bold;
+}
+
+#handoff-editor {
+    height: 18;
+    background: #0e1116;
+    border: solid #2a3344;
+    margin: 1 0;
+}
+
+#delegate-question {
+    height: 4;
+    background: #0e1116;
+    border: solid #2a3344;
+    margin: 0 0 1 0;
+}
+
+#session-picker-list {
+    height: 14;
+    border: solid #2a3344;
+    background: #0e1116;
+    margin: 1 0;
+}
+
+#glossary-dialog {
+    width: 84;
+    max-width: 92%;
+    height: 82%;
+    border: solid #303a4b;
+    background: #151922;
+    padding: 1 2;
+}
+
+#glossary-scroll {
+    height: 1fr;
+    padding-right: 1;
+}
+
+#glossary-footer {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+#diff-fullscreen-dialog {
+    width: 96%;
+    height: 92%;
+    border: solid #6ea8fe;
+    background: #0e1116;
+    padding: 1 2;
+}
+
+#diff-fullscreen-scroll {
+    height: 1fr;
+}

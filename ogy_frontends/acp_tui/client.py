@@ -15,13 +15,14 @@ import acp
 from acp import schema
 from acp.exceptions import RequestError
 
+from ogy_core import get_version
 from ogy_core.config import OgyConfig, load_config
 from ogy_core.ingest import ingest_acp_turn
 from ogy_core.pricing import normalize_model_id
 from ogy_core.storage import canonical_args_hash, connect, upsert_tool_call, utc_now_iso
 
 CLIENT_NAME = "optigravity"
-CLIENT_VERSION = "0.2.0"
+CLIENT_VERSION = get_version()
 
 VALID_ACP_MODES = frozenset({"default", "accept-edits", "auto", "plan"})
 BANNED_ACP_MODES = frozenset({"yolo"})
@@ -76,6 +77,8 @@ class ToolCallEvent:
     raw_input: Any = None
     raw_output: Any = None
     is_error: bool = False
+    locations: list[Any] = field(default_factory=list)
+    content: list[Any] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +110,9 @@ class PermissionRequestEvent:
     title: str
     options: list[tuple[str, str, str]]  # (option_id, name, kind)
     future: asyncio.Future[str | None]
+    kind: str | None = None
+    raw_input: Any = None
+    content: list[Any] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +121,16 @@ class ElicitationRequestEvent:
     elicitation_id: str
     message: str
     future: asyncio.Future[dict[str, Any]]
+    mode: str = "form"  # "form" or "url"
+    requested_schema: dict[str, Any] | None = None
+    url: str | None = None
+    tool_call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ElicitationCompleteEvent:
+    session_id: str
+    elicitation_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +148,7 @@ AcpEvent = (
     | ConfigUpdateEvent
     | PermissionRequestEvent
     | ElicitationRequestEvent
+    | ElicitationCompleteEvent
     | SessionNoticeEvent
 )
 
@@ -239,9 +256,44 @@ class _BridgeClient(acp.Client):
         mode: Any,
         **kwargs: Any,
     ) -> Any:
+        session_id = str(
+            getattr(mode, "session_id", None)
+            or kwargs.get("session_id")
+            or self._owner.active_session_id
+            or ""
+        )
+        elicitation_id = str(
+            getattr(mode, "elicitation_id", None)
+            or kwargs.get("elicitation_id")
+            or ""
+        )
+        tool_call_id = getattr(mode, "tool_call_id", None)
+        url = getattr(mode, "url", None)
+        req_schema_raw = getattr(mode, "requested_schema", None)
+        if req_schema_raw is None and isinstance(mode, dict):
+            req_schema_raw = mode.get("requested_schema") or mode.get("requestedSchema")
+            url = url or mode.get("url")
+            elicitation_id = elicitation_id or str(mode.get("elicitation_id") or mode.get("elicitationId") or "")
+        req_schema: dict[str, Any] | None = None
+        if req_schema_raw is not None:
+            if hasattr(req_schema_raw, "model_dump"):
+                req_schema = req_schema_raw.model_dump()
+            elif isinstance(req_schema_raw, dict):
+                req_schema = dict(req_schema_raw)
+        mode_name = "url" if url else "form"
+        return await self._owner._handle_create_elicitation(
+            session_id,
+            elicitation_id,
+            message,
+            mode=mode_name,
+            requested_schema=req_schema,
+            url=str(url) if url else None,
+            tool_call_id=str(tool_call_id) if tool_call_id else None,
+        )
+
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
         session_id = str(kwargs.get("session_id") or self._owner.active_session_id or "")
-        elicitation_id = str(kwargs.get("elicitation_id") or "")
-        return await self._owner._handle_create_elicitation(session_id, elicitation_id, message)
+        await self._owner._emit(ElicitationCompleteEvent(session_id=session_id, elicitation_id=str(elicitation_id)))
 
 
 class AcpClient:
@@ -320,10 +372,11 @@ class AcpClient:
 
     async def _initialize_with_auth(self) -> dict[str, Any]:
         assert self._conn is not None
+        elicit_kwargs: dict[str, Any] = {"form": schema.ElicitationFormCapabilities()}
+        if hasattr(schema, "ElicitationUrlCapabilities"):
+            elicit_kwargs["url"] = schema.ElicitationUrlCapabilities()
         client_caps = schema.ClientCapabilities(
-            elicitation=schema.ElicitationCapabilities(
-                form=schema.ElicitationFormCapabilities(),
-            )
+            elicitation=schema.ElicitationCapabilities(**elicit_kwargs)
         )
         client_info = schema.Implementation(name=CLIENT_NAME, version=CLIENT_VERSION)
         try:
@@ -531,6 +584,16 @@ class AcpClient:
             is_err = status in ("failed", "error")
             raw_in = getattr(update, "raw_input", None)
             raw_out = getattr(update, "raw_output", None)
+            raw_locs = getattr(update, "locations", None) or []
+            raw_content = getattr(update, "content", None) or []
+            locs = [
+                loc.model_dump() if hasattr(loc, "model_dump") else loc
+                for loc in (raw_locs if isinstance(raw_locs, list) else [raw_locs])
+            ]
+            content_blocks = [
+                blk.model_dump() if hasattr(blk, "model_dump") else blk
+                for blk in (raw_content if isinstance(raw_content, list) else [raw_content])
+            ]
             await self._emit(
                 ToolCallEvent(
                     session_id=session_id,
@@ -542,6 +605,8 @@ class AcpClient:
                     raw_input=raw_in,
                     raw_output=raw_out,
                     is_error=is_err,
+                    locations=locs,
+                    content=content_blocks,
                 )
             )
             if status in ("completed", "failed", "error"):
@@ -581,6 +646,13 @@ class AcpClient:
         tc_id = str(getattr(tool_call, "tool_call_id", ""))
         tool_name = str(getattr(tool_call, "name", None) or getattr(tool_call, "title", None) or "tool")
         title = str(getattr(tool_call, "title", None) or tool_name)
+        kind = getattr(tool_call, "kind", None)
+        raw_in = getattr(tool_call, "raw_input", None)
+        raw_content = getattr(tool_call, "content", None) or []
+        content_blocks = [
+            blk.model_dump() if hasattr(blk, "model_dump") else blk
+            for blk in (raw_content if isinstance(raw_content, list) else [raw_content])
+        ]
 
         if self._on_event is None:
             # No UI attached: fail safe by rejecting once
@@ -594,6 +666,9 @@ class AcpClient:
                 title=title,
                 options=opts,
                 future=fut,
+                kind=str(kind) if kind is not None else None,
+                raw_input=raw_in,
+                content=content_blocks,
             )
         )
         chosen_option = await fut
@@ -608,6 +683,11 @@ class AcpClient:
         session_id: str,
         elicitation_id: str,
         message: str,
+        *,
+        mode: str = "form",
+        requested_schema: dict[str, Any] | None = None,
+        url: str | None = None,
+        tool_call_id: str | None = None,
     ) -> Any:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -619,6 +699,10 @@ class AcpClient:
                 elicitation_id=elicitation_id,
                 message=message,
                 future=fut,
+                mode=mode,
+                requested_schema=requested_schema,
+                url=url,
+                tool_call_id=tool_call_id,
             )
         )
         result = await fut

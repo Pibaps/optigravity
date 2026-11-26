@@ -10,7 +10,7 @@ from ogy_core.config import OgyConfig, load_config
 from ogy_core.context_health import ContextHealth, assess_context_health, write_handoff
 from ogy_core.ingest import get_latest_quota_snapshots
 from ogy_core.pricing import normalize_model_id, switch_tax_usd
-from ogy_core.storage import connect
+from ogy_core.storage import connect_readonly
 
 
 @dataclass(slots=True)
@@ -184,9 +184,14 @@ class SessionOrchestrator:
         return new_sid, str(res["path"]), str(res["content"])
 
     def read_quota_snapshots(self) -> dict[str, dict[str, Any]]:
-        """Read latest quota_snapshots from ogy.db (never polls agy in a loop)."""
-        conn = connect(self.ogy_config.db_path, init_schema=True)
+        """Read latest quota_snapshots from ogy.db read-only (never polls agy in a loop)."""
+        if not self.ogy_config.db_path.is_file():
+            return {}
         try:
-            return get_latest_quota_snapshots(conn)
-        finally:
-            conn.close()
+            conn = connect_readonly(self.ogy_config.db_path)
+            try:
+                return get_latest_quota_snapshots(conn)
+            finally:
+                conn.close()
+        except Exception:
+            return {}

@@ -65,6 +65,15 @@ class FakeAgentConn:
         self.calls.append(("resume_session", kwargs))
         return SimpleNamespace(config_options=[SimpleNamespace(id="model", current_value="gemini-4-neon")])
 
+    async def list_sessions(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls.append(("list_sessions", kwargs))
+        return SimpleNamespace(
+            sessions=[
+                SimpleNamespace(session_id=f"acp-sess-{i}", title=f"Session {i}")
+                for i in range(1, self.session_counter + 1)
+            ]
+        )
+
     async def close_session(self, **kwargs: Any) -> SimpleNamespace:
         self.calls.append(("close_session", kwargs))
         return SimpleNamespace()

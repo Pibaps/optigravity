@@ -1,4 +1,4 @@
-"""Headless Textual TUI tests for Optigravity V2 (`ogy tui`)."""
+"""Headless Textual Pilot tests for Optigravity Phase 2 (`ogy tui`)."""
 
 from __future__ import annotations
 
@@ -6,16 +6,20 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from textual.containers import VerticalScroll
-from textual.widgets import Input, Markdown, OptionList, Static
+from textual import events
+from textual.widgets import Button, ContentSwitcher, Input, OptionList, Static, TextArea
 
 from ogy_core.config import load_config
 from ogy_core.storage import connect
 from ogy_frontends.acp_tui.app import (
+    ElicitationModal,
     GlossaryModal,
+    HandoffReviewModal,
     MetricGauge,
     OptigravityApp,
     OptigravityCommandProvider,
+    PermissionModal,
+    SessionPickerModal,
     TelemetryPanel,
     _clean_file_links,
     _human_quota_label,
@@ -24,8 +28,19 @@ from ogy_frontends.acp_tui.client import (
     AcpClientConfig,
     AgentMessageEvent,
     AgentThoughtEvent,
+    ElicitationCompleteEvent,
+    ElicitationRequestEvent,
+    PermissionRequestEvent,
     ToolCallEvent,
     UsageEvent,
+)
+from ogy_frontends.acp_tui.screens.modals import DiffPreviewModal
+from ogy_frontends.acp_tui.widgets.composer import PromptComposer, PromptTextArea
+from ogy_frontends.acp_tui.widgets.transcript import (
+    ActivityGroup,
+    AssistantMessage,
+    ThoughtBlock,
+    ToolCard,
 )
 from tests.test_acp_client import FakeAgentConn
 
@@ -41,10 +56,9 @@ def test_tui_app_streams_and_handles_commands(tmp_path: Path, monkeypatch: pytes
 
     async def _run() -> None:
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(0.15)
             assert app.client.active_session_id == "acp-sess-1"
 
-            # Session bar must have >=1 visible content line (>=2 outer height with border-bottom)
             session_bar = app.query_one("#session-bar", Static)
             assert session_bar.size.height >= 1
             assert session_bar.outer_size.height >= 2
@@ -52,30 +66,31 @@ def test_tui_app_streams_and_handles_commands(tmp_path: Path, monkeypatch: pytes
             assert "gemini-4-hydrogen" in bar_text
             assert "Effort" in bar_text
 
-            # Chronological stream order: msg1 -> tool -> msg2 must mount msg2 AFTER tool
+            # Chronological stream order: thought -> msg1 -> tool -> msg2
             await app._on_acp_event(AgentThoughtEvent("acp-sess-1", "Analyzing codebase..."))
             activity = app.query_one("#activity-bar", Static)
             assert activity.has_class("visible")
 
             await app._on_acp_event(AgentMessageEvent("acp-sess-1", "First message before tool."))
-            await app._on_acp_event(
-                ToolCallEvent("acp-sess-1", "tc1", "run_command", "pytest -q", "running")
-            )
-            await app._on_acp_event(
-                ToolCallEvent("acp-sess-1", "tc1", "run_command", "pytest -q", "completed")
-            )
+            await app._on_acp_event(ToolCallEvent("acp-sess-1", "tc1", "run_command", "pytest -q", "running"))
+            await app._on_acp_event(ToolCallEvent("acp-sess-1", "tc1", "run_command", "pytest -q", "completed"))
             await app._on_acp_event(AgentMessageEvent("acp-sess-1", "Final answer after tool."))
+            await pilot.pause(0.05)
 
-            stream = app.query_one("#stream-scroll", VerticalScroll)
-            children = list(stream.children)
-            md_indices = [i for i, w in enumerate(children) if isinstance(w, Markdown)]
-            tool_indices = [i for i, w in enumerate(children) if isinstance(w, Static) and w.has_class("tool-line")]
-            assert len(md_indices) == 2
+            tr = app.get_active_transcript()
+            assert tr is not None
+            children = list(tr.children)
+            thought_indices = [i for i, w in enumerate(children) if isinstance(w, ThoughtBlock)]
+            msg_indices = [i for i, w in enumerate(children) if isinstance(w, AssistantMessage)]
+            tool_indices = [i for i, w in enumerate(children) if isinstance(w, ToolCard)]
+            assert len(thought_indices) == 1
+            assert children[thought_indices[0]].collapsed is True
+            assert len(msg_indices) == 2
             assert len(tool_indices) == 1
-            assert md_indices[0] < tool_indices[0] < md_indices[1]
+            assert msg_indices[0] < tool_indices[0] < msg_indices[1]
 
             assert app.current_state is not None
-            app.current_state.last_turn_monotonic -= 120.0  # simulate old timestamp before final turn
+            app.current_state.last_turn_monotonic -= 120.0
             await app._on_acp_event(
                 UsageEvent(
                     session_id="acp-sess-1",
@@ -89,17 +104,13 @@ def test_tui_app_streams_and_handles_commands(tmp_path: Path, monkeypatch: pytes
                 )
             )
             await pilot.pause(0.05)
-
-            # Spinner hides when turn completes, and idle_gap_s resets
             assert not activity.has_class("visible")
             assert app.current_state.idle_gap_s < 5.0
 
             tel = app.query_one("#telemetry-panel", TelemetryPanel)
-            thought_lbl = str(tel.query_one("#tel-thought").render())
-            assert "310" in thought_lbl
+            assert "310" in str(tel.query_one("#tel-thought").render())
 
-            # Slash command /mode yolo must be rejected, /mode plan accepted
-            inp = app.query_one("#prompt-input", Input)
+            inp = app.query_one("#prompt-input", PromptTextArea)
             inp.value = "/mode yolo"
             await inp.action_submit()
             await pilot.pause(0.05)
@@ -110,18 +121,15 @@ def test_tui_app_streams_and_handles_commands(tmp_path: Path, monkeypatch: pytes
             await pilot.pause(0.05)
             assert app.current_state.mode == "plan"
 
-            # /model without arg should NOT error; it lists current & available models
             inp.value = "/model"
             await inp.action_submit()
             await pilot.pause(0.05)
 
-            # /btw command sends a concise side question prompt
             inp.value = "/btw what is 2+2?"
             await inp.action_submit()
             await pilot.pause(0.1)
             assert any(name == "prompt" for name, _ in fake.calls)
 
-            # /lang en switches UI labels to English and /lang fr switches back
             inp.value = "/lang en"
             await inp.action_submit()
             await pilot.pause(0.05)
@@ -134,7 +142,6 @@ def test_tui_app_streams_and_handles_commands(tmp_path: Path, monkeypatch: pytes
             assert app.lang == "fr"
             assert "Modèle :" in str(app.query_one("#session-bar", Static).render())
 
-            # Ctrl+C sends session/cancel without killing app
             await pilot.press("ctrl+c")
             await pilot.pause(0.05)
             assert any(name == "cancel" for name, _ in fake.calls)
@@ -148,7 +155,6 @@ def test_tui_slash_autocomplete_palette_glossary_and_quota_gauges(
     db_path = tmp_path / "ogy.db"
     monkeypatch.setenv("OGY_DB_PATH", str(db_path))
 
-    # Seed quota_snapshots in SQLite so TelemetryPanel renders per-bucket MetricGauge widgets
     conn = connect(db_path, init_schema=True)
     try:
         conn.execute(
@@ -172,24 +178,22 @@ def test_tui_slash_autocomplete_palette_glossary_and_quota_gauges(
 
     async def _run() -> None:
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(0.25)
 
-            # Quota gauges rendered with human labels (FR & EN)
             tel = app.query_one("#telemetry-panel", TelemetryPanel)
             assert tel.query_one("#quota-gemini-5h", MetricGauge) is not None
             assert tel.query_one("#quota-3p-weekly", MetricGauge) is not None
             assert _human_quota_label("3p-5h", "fr") == "Tiers / Claude (5h)"
             assert _human_quota_label("3p-weekly", "en") == "3rd-Party / Claude (7d)"
 
-            # Slash autocomplete popup includes /btw and /lang, and Tab completes `/mod` -> `/model `
             assert any(ins == "/btw " for ins, _ in app.get_slash_completions("/b"))
             assert any(ins == "/lang en" for ins, _ in app.get_slash_completions("/lang "))
 
-            inp = app.query_one("#prompt-input", Input)
+            inp = app.query_one("#prompt-input", PromptTextArea)
             inp.focus()
             inp.value = "/mod"
             await pilot.pause(0.05)
-            popup = app.query_one("#slash-popup", OptionList)
+            popup = app.query_one("#composer-popup", OptionList)
             assert popup.has_class("visible")
             await pilot.press("tab")
             await pilot.pause(0.05)
@@ -197,7 +201,6 @@ def test_tui_slash_autocomplete_palette_glossary_and_quota_gauges(
             arg_completions = app.get_slash_completions("/model ")
             assert any("gemini-4-hydrogen" in insert for insert, _ in arg_completions)
 
-            # Command palette provider exposes Optigravity commands via discover()
             provider = OptigravityCommandProvider(app.screen, match_style=None)
             discovered = [hit async for hit in provider.discover()]
             titles = [str(h.display) for h in discovered]
@@ -206,7 +209,6 @@ def test_tui_slash_autocomplete_palette_glossary_and_quota_gauges(
             assert any("Modèle →" in t for t in titles)
             assert any("Langue / Language" in t for t in titles)
 
-            # F1 opens GlossaryModal, Escape closes it
             await pilot.press("f1")
             await pilot.pause(0.05)
             assert isinstance(app.screen, GlossaryModal)
@@ -214,7 +216,6 @@ def test_tui_slash_autocomplete_palette_glossary_and_quota_gauges(
             await pilot.pause(0.05)
             assert not isinstance(app.screen, GlossaryModal)
 
-            # Proposal upgrade action applies config change after >=2 failures
             await app._on_acp_event(ToolCallEvent("acp-sess-1", "e1", "run_command", "fail 1", "failed", is_error=True))
             await app._on_acp_event(ToolCallEvent("acp-sess-1", "e2", "run_command", "fail 2", "failed", is_error=True))
             await pilot.pause(0.05)
@@ -251,27 +252,23 @@ def test_tui_frugal_startup_and_first_prompt_stage1_routing(
 
     async def _run() -> None:
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(0.15)
             assert app.current_state is not None
-            # Starts on frugal default (gemini-4-hydrogen / medium)
             assert app.current_state.model_id == "gemini-4-hydrogen"
             assert app.current_state.effort == "medium"
 
-            # 1st prompt classified as bugfix_local -> auto-routes to gemini-4-neon / low (0 Switch Tax)
-            inp = app.query_one("#prompt-input", Input)
+            inp = app.query_one("#prompt-input", PromptTextArea)
             inp.value = "Fix bug in parser.py"
             await inp.action_submit()
-            await pilot.pause(0.1)
+            await pilot.pause(0.15)
             assert app.current_state.model_id == "gemini-4-neon"
             assert app.current_state.effort == "low"
 
-            # Stickiness: 2nd prompt must NOT re-route away from active session profile
             inp.value = "Fix typo in README"
             await inp.action_submit()
-            await pilot.pause(0.1)
+            await pilot.pause(0.15)
             assert app.current_state.model_id == "gemini-4-neon"
 
-            # Manual override via /model on a fresh session skips 1st-prompt auto-routing
             await app.action_new_session()
             await pilot.pause(0.1)
             assert app.current_state.model_id == "gemini-4-hydrogen"
@@ -282,7 +279,402 @@ def test_tui_frugal_startup_and_first_prompt_stage1_routing(
 
             inp.value = "Fix bug in parser.py"
             await inp.action_submit()
-            await pilot.pause(0.1)
+            await pilot.pause(0.15)
             assert app.current_state.model_id == "gemini-4-carbon"
+
+    asyncio.run(_run())
+
+
+def test_composer_paste_collapse_200_lines_history_and_at_file_no_content_injection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OGY_DB_PATH", str(tmp_path / "ogy.db"))
+    secret_marker = "SUPER_SECRET_FILE_BODY_MUST_NEVER_BE_INJECTED"
+    (tmp_path / "small.py").write_text(f"# {secret_marker}\nprint('ok')\n", encoding="utf-8")
+    (tmp_path / "huge.log").write_text("x" * 12_000, encoding="utf-8")
+
+    fake = FakeAgentConn()
+    app = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake,
+    )
+
+    async def _run() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.25)
+            inp = app.query_one("#prompt-input", PromptTextArea)
+            composer = app.query_one("#prompt-composer", PromptComposer)
+            inp.focus()
+
+            # 1. Paste 200 lines -> collapsed into compact chip, re-injected verbatim on submit
+            big_paste = "\n".join(f"line {i}" for i in range(1, 201))
+            inp.post_message(events.Paste(big_paste))
+            await pilot.pause(0.05)
+            assert "[Pasted #1 · 200 lignes]" in inp.value
+            assert "line 200" not in inp.value
+
+            # Attach an image block via extra_blocks
+            chip = inp.attach_image(b"\x89PNG\r\n", mime_type="image/png")
+            assert chip == "[Image #1]"
+
+            await inp.action_submit()
+            await pilot.pause(0.2)
+            prompt_calls = [args for name, args in fake.calls if name == "prompt"]
+            assert prompt_calls
+            sent_blocks = prompt_calls[-1]["prompt"]
+            assert "line 1" in sent_blocks[0].text and "line 200" in sent_blocks[0].text
+            assert len(sent_blocks) == 2 and sent_blocks[1].type == "image"
+
+            # 2. Multiline Ctrl+J newline + cursor-first Up/Down + draft preservation
+            inp.value = "first prompt"
+            await inp.action_submit()
+            await pilot.pause(0.1)
+            inp.value = "draft line 1"
+            await pilot.press("ctrl+j")
+            inp.insert("draft line 2")
+            await pilot.pause(0.05)
+            assert "\n" in inp.value
+            # Up moves cursor from line 2 to line 1 (does NOT trigger history yet)
+            await pilot.press("up")
+            await pilot.pause(0.05)
+            assert "draft line 1" in inp.value
+            # Up from line 1 recalls previous history entry
+            await pilot.press("up")
+            await pilot.pause(0.05)
+            assert inp.value == "first prompt"
+            # Down restores preserved draft
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            assert "draft line 1" in inp.value
+
+            # 3. @file autocomplete inserts ONLY relative path (0 content injection) + Tab toggles tree view
+            inp.value = "Inspect @sm"
+            await pilot.pause(0.05)
+            popup = app.query_one("#composer-popup", OptionList)
+            assert popup.has_class("visible")
+            await pilot.press("tab")
+            await pilot.pause(0.05)
+            assert composer._file_tree_mode is True
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert "@small.py" in inp.value
+            assert secret_marker not in inp.value
+
+    asyncio.run(_run())
+
+
+def test_smart_scroll_no_hijacking_and_raw_markdown_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OGY_DB_PATH", str(tmp_path / "ogy.db"))
+    fake = FakeAgentConn()
+    app = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake,
+    )
+
+    async def _run() -> None:
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause(0.15)
+            tr = app.get_active_transcript()
+            assert tr is not None
+            assert tr.is_anchored is True
+
+            code_block = "```python\ndef hello():\n    return 42\n```\n"
+            await app._on_acp_event(
+                AgentMessageEvent("acp-sess-1", code_block + ("\n".join(f"Line {i}" for i in range(60))))
+            )
+            await pilot.pause(0.1)
+
+            # User scrolls up manually -> anchor released, 0 scroll hijacking on new chunks
+            tr.scroll_y = 0
+            tr.detach_anchor()
+            await pilot.pause(0.05)
+            assert tr.is_anchored is False
+
+            await app._on_acp_event(AgentMessageEvent("acp-sess-1", "\nMore streamed text while reading above."))
+            await pilot.pause(0.05)
+            pill = app.query_one("#new-messages-pill", Button)
+            assert pill.has_class("visible")
+            assert tr.is_anchored is False
+            assert tr.scroll_y == 0
+
+            tr.pin_to_bottom()
+            await pilot.pause(0.05)
+            assert tr.is_anchored is True
+            assert not pill.has_class("visible")
+
+            msg = tr.query_one(AssistantMessage)
+            assert "def hello():\n    return 42" in msg.raw_markdown
+            assert msg.extract_code_blocks() == ["def hello():\n    return 42"]
+
+    asyncio.run(_run())
+
+
+def test_tool_transparency_activity_group_inline_diffs_and_expanded_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OGY_DB_PATH", str(tmp_path / "ogy.db"))
+    fake = FakeAgentConn()
+    app = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake,
+    )
+
+    async def _run() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.15)
+            tr = app.get_active_transcript()
+            assert tr is not None
+
+            await app._on_acp_event(ToolCallEvent("acp-sess-1", "r1", "read_file", "a.py", "completed", kind="read"))
+            await app._on_acp_event(ToolCallEvent("acp-sess-1", "s1", "grep_search", "foo", "completed", kind="search"))
+            await pilot.pause(0.05)
+            groups = list(tr.query(ActivityGroup))
+            assert len(groups) == 1
+            assert groups[0].collapsed is True
+
+            await pilot.press("ctrl+o")
+            await pilot.pause(0.05)
+            assert app.verbosity == "high"
+            assert groups[0].collapsed is False
+            await pilot.press("ctrl+o")
+            await pilot.pause(0.05)
+            assert app.verbosity == "low"
+
+            # Small inline diff (<= 25 lines) -> expanded by default
+            await app._on_acp_event(
+                ToolCallEvent(
+                    "acp-sess-1",
+                    "ed1",
+                    "edit_file",
+                    "app.py",
+                    "completed",
+                    kind="edit",
+                    content=[{"type": "diff", "path": "app.py", "oldText": "x = 1\n", "newText": "x = 2\n"}],
+                )
+            )
+            # Large diff (> 25 lines) -> collapsed summary + fullscreen button
+            old_big = "\n".join(f"old_{i}" for i in range(30))
+            new_big = "\n".join(f"new_{i}" for i in range(30))
+            await app._on_acp_event(
+                ToolCallEvent(
+                    "acp-sess-1",
+                    "ed2",
+                    "edit_file",
+                    "big.py",
+                    "completed",
+                    kind="edit",
+                    content=[{"type": "diff", "path": "big.py", "oldText": old_big, "newText": new_big}],
+                )
+            )
+            # Failed tool call -> ALWAYS expanded even in low verbosity
+            await app._on_acp_event(
+                ToolCallEvent(
+                    "acp-sess-1",
+                    "err1",
+                    "run_command",
+                    "pytest",
+                    "failed",
+                    raw_input={"CommandLine": "pytest"},
+                    raw_output="AssertionError: boom",
+                    is_error=True,
+                )
+            )
+            await pilot.pause(0.05)
+
+            cards = list(tr.query(ToolCard))
+            assert len(cards) == 3
+            assert cards[0].collapsed is False
+            assert cards[1].collapsed is True
+            assert "+30 / -30" in str(cards[1].title)
+            assert cards[2].collapsed is False
+
+    asyncio.run(_run())
+
+
+def test_permission_modal_one_key_and_elicitation_form_and_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OGY_DB_PATH", str(tmp_path / "ogy.db"))
+    fake = FakeAgentConn()
+    app = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake,
+    )
+
+    async def _run() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.15)
+            loop = asyncio.get_running_loop()
+
+            # 1. PermissionModal: F opens fullscreen DiffPreviewModal, Esc closes preview, Y selects allow_once
+            fut1: asyncio.Future[str | None] = loop.create_future()
+            await app._on_acp_event(
+                PermissionRequestEvent(
+                    session_id="acp-sess-1",
+                    tool_call_id="p1",
+                    tool_name="run_command",
+                    title="Run tests",
+                    options=[
+                        ("allow_once", "Allow once", "allow_once"),
+                        ("allow_always", "Allow always", "allow_always"),
+                        ("reject_once", "Reject", "reject_once"),
+                        ("reject_always", "Never", "reject_always"),
+                    ],
+                    future=fut1,
+                    kind="execute",
+                    raw_input={"CommandLine": "pytest -q"},
+                )
+            )
+            await pilot.pause(0.05)
+            assert isinstance(app.screen, PermissionModal)
+            await pilot.press("f")
+            await pilot.pause(0.05)
+            assert isinstance(app.screen, DiffPreviewModal)
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            assert isinstance(app.screen, PermissionModal)
+            await pilot.press("y")
+            await pilot.pause(0.05)
+            assert fut1.done() and fut1.result() == "allow_once"
+
+            # 2. PermissionModal: X selects reject_always
+            fut2: asyncio.Future[str | None] = loop.create_future()
+            await app._on_acp_event(
+                PermissionRequestEvent(
+                    session_id="acp-sess-1",
+                    tool_call_id="p2",
+                    tool_name="run_command",
+                    title="rm -rf tmp",
+                    options=[
+                        ("allow_once", "Allow once", "allow_once"),
+                        ("reject_always", "Never", "reject_always"),
+                    ],
+                    future=fut2,
+                    kind="delete",
+                )
+            )
+            await pilot.pause(0.05)
+            await pilot.press("x")
+            await pilot.pause(0.05)
+            assert fut2.done() and fut2.result() == "reject_always"
+
+            # 3. ElicitationModal (form mode) -> dynamic fields + Ctrl+Enter submit
+            efut1: asyncio.Future[dict[str, object]] = loop.create_future()
+            await app._on_acp_event(
+                ElicitationRequestEvent(
+                    session_id="acp-sess-1",
+                    elicitation_id="el-form-1",
+                    message="Configure deployment",
+                    future=efut1,
+                    mode="form",
+                    requested_schema={
+                        "type": "object",
+                        "properties": {
+                            "env": {"type": "string", "title": "Environment", "default": "staging"},
+                            "dry_run": {"type": "boolean", "title": "Dry run", "default": True},
+                        },
+                        "required": ["env"],
+                    },
+                )
+            )
+            await pilot.pause(0.05)
+            assert isinstance(app.screen, ElicitationModal)
+            await pilot.press("ctrl+enter")
+            await pilot.pause(0.05)
+            assert efut1.done()
+            assert efut1.result() == {"action": "accept", "content": {"env": "staging", "dry_run": True}}
+
+            # 4. ElicitationModal (url mode) -> displays netloc, no form inputs, auto-completes on server notice
+            efut2: asyncio.Future[dict[str, object]] = loop.create_future()
+            await app._on_acp_event(
+                ElicitationRequestEvent(
+                    session_id="acp-sess-1",
+                    elicitation_id="el-url-1",
+                    message="Sign in to GitHub",
+                    future=efut2,
+                    mode="url",
+                    url="https://github.com/login/device",
+                )
+            )
+            await pilot.pause(0.05)
+            assert isinstance(app.screen, ElicitationModal)
+            assert "github.com" in str(app.screen.query_one("#elicit-url-host", Static).render())
+            assert len(list(app.screen.query(Input))) == 0
+            await app._on_acp_event(ElicitationCompleteEvent("acp-sess-1", "el-url-1"))
+            await pilot.pause(0.05)
+            assert efut2.done() and efut2.result()["action"] == "accept"
+
+    asyncio.run(_run())
+
+
+def test_multi_session_isolation_new_rotate_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OGY_DB_PATH", str(tmp_path / "ogy.db"))
+    fake = FakeAgentConn()
+    app = OptigravityApp(
+        client_config=AcpClientConfig(cwd=str(tmp_path)),
+        ogy_config=load_config(),
+        injected_agent_conn=fake,
+    )
+
+    async def _run() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.15)
+            assert app.client.active_session_id == "acp-sess-1"
+            await app._on_acp_event(AgentMessageEvent("acp-sess-1", "Message ONLY in session 1"))
+            await pilot.pause(0.05)
+
+            await app.action_new_session()
+            await pilot.pause(0.1)
+            assert app.client.active_session_id == "acp-sess-2"
+            await app._on_acp_event(AgentMessageEvent("acp-sess-2", "Message ONLY in session 2"))
+            await pilot.pause(0.05)
+
+            tr1 = app._transcripts["acp-sess-1"]
+            tr2 = app._transcripts["acp-sess-2"]
+            assert tr1 is not tr2
+            assert any("session 1" in m.raw_markdown for m in tr1.query(AssistantMessage))
+            assert not any("session 2" in m.raw_markdown for m in tr1.query(AssistantMessage))
+            assert any("session 2" in m.raw_markdown for m in tr2.query(AssistantMessage))
+            assert not any("session 1" in m.raw_markdown for m in tr2.query(AssistantMessage))
+
+            # /rotate opens HandoffReviewModal -> confirm writes .ogy/handoff.md & opens acp-sess-3
+            await app.action_open_rotation_review()
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, HandoffReviewModal)
+            editor = app.screen.query_one("#handoff-editor", TextArea)
+            editor.insert("\nCustom note before rotation")
+            await pilot.press("ctrl+enter")
+            await pilot.pause(0.2)
+            assert app.client.active_session_id == "acp-sess-3"
+            assert (tmp_path / ".ogy" / "handoff.md").is_file()
+            assert "Custom note before rotation" in (tmp_path / ".ogy" / "handoff.md").read_text(encoding="utf-8")
+
+            # Ctrl+S opens SessionPickerModal -> resume acp-sess-1 switches ContentSwitcher
+            await pilot.press("ctrl+s")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, SessionPickerModal)
+            app.screen.dismiss("acp-sess-1")
+            await pilot.pause(0.1)
+            assert app.client.active_session_id == "acp-sess-1"
+            switcher = app.query_one("#session-switcher", ContentSwitcher)
+            assert switcher.current == app._transcript_widget_id("acp-sess-1")
+
+            # [V] switch_to_v1_run proposal when requesting Claude under oauth-personal
+            inp = app.query_one("#prompt-input", PromptTextArea)
+            inp.value = "/model claude-5.5-sonnet"
+            await inp.action_submit()
+            await pilot.pause(0.05)
+            assert any(p.kind == "switch_to_v1_run" for p in app.active_proposals)
+            await app.action_accept_proposal()
+            await pilot.pause(0.05)
+            assert not any(p.kind == "switch_to_v1_run" for p in app.active_proposals)
 
     asyncio.run(_run())
