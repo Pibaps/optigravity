@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+try:
+    from mcp.server.mcpserver import MCPServer
+except ImportError as _exc:
+    print(
+        f'Missing optional MCP dependency ({_exc.name or _exc}).\n'
+        'Install with: uv tool install "optigravity[mcp]"  (or: pip install "optigravity[mcp]")',
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from _exc
 
 from ogy_core.config import load_config
 from ogy_core.context_health import assess_context_health, write_handoff
