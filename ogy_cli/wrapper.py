@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Sequence
 
 from ogy_core.config import load_config
+from ogy_core.ingest import get_latest_quota_snapshots
 from ogy_core.router import RouteDecision, route_stage1, route_stage2_bandit
-from ogy_core.storage import connect, query_all, write_tx
+from ogy_core.storage import connect, write_pending_task, write_tx
 
 
 def _detect_git_state(cwd: Path) -> tuple[int, bool]:
@@ -80,12 +81,14 @@ def run_agy(
     remaining_quota: float | None = None
     conn = connect(cfg.db_path, init_schema=True)
     try:
-        qrows = query_all(
-            conn,
-            "SELECT MIN(remaining_fraction) AS min_q FROM quota_snapshots WHERE remaining_fraction IS NOT NULL",
-        )
-        if qrows and qrows[0]["min_q"] is not None:
-            remaining_quota = float(qrows[0]["min_q"])
+        latest_quotas = get_latest_quota_snapshots(conn)
+        active_fractions = [
+            float(snap["remaining_fraction"])
+            for snap in latest_quotas.values()
+            if snap.get("remaining_fraction") is not None
+        ]
+        if active_fractions:
+            remaining_quota = min(active_fractions)
 
         if model or effort or mode:
             decision = route_stage1(
@@ -145,6 +148,26 @@ def run_agy(
         print(f"[ogy run dry-run] agy {' '.join(agy_args)}")
         print(f"[ogy meta] {env['OGY_SESSION_META']}")
         return 0
+
+    try:
+        write_pending_task(
+            cwd,
+            pending_dir=cfg.stash_dir.parent / "pending_tasks",
+            task_id=task_id,
+            decision={
+                "stage": decision.stage,
+                "category": decision.category,
+                "model": decision.model_id,
+                "effort": decision.effort,
+                "mode": decision.mode,
+                "features": decision.features,
+                "propensity": decision.propensity,
+                "predicted_score": decision.predicted_score,
+            },
+            ttl_seconds=30.0,
+        )
+    except OSError:
+        pass
 
     if os.name == "nt":
         try:

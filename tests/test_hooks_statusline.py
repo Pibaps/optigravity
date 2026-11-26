@@ -26,15 +26,92 @@ def _cfg(tmp_path: Path, *, cap_usd: float | None = None) -> OgyConfig:
 
 
 def test_hot_path_stdlib_only() -> None:
-    # Verify importing ogy_hooks.cli and ogy_statusline.render in a fresh Python process
-    # does not load mcp, pydantic, rich, or numpy.
+    # Verify importing ogy_core, ogy_hooks.cli, ogy_statusline.render, and ogy_cli.main
+    # in a fresh Python process does not load third-party dependencies.
     code = (
-        "import sys; import ogy_hooks.cli, ogy_statusline.render; "
-        "forbidden = {'mcp', 'pydantic', 'rich', 'numpy'} & set(sys.modules); "
+        "import sys; import ogy_core.storage, ogy_core.firebreaks, ogy_core.ingest, "
+        "ogy_hooks.cli, ogy_statusline.render, ogy_cli.main; "
+        "forbidden = {'mcp', 'pydantic', 'rich', 'numpy', 'textual', 'acp', 'google'} & set(sys.modules); "
         "assert not forbidden, f'Forbidden modules imported: {forbidden}'"
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
+
+
+def test_hook_p95_latency_and_pending_task_correlation(tmp_path: Path) -> None:
+    import time
+
+    from ogy_core.storage import connect, query_all, write_pending_task
+
+    cfg = _cfg(tmp_path)
+    # Warm DB schema once (steady state)
+    conn = connect(cfg.db_path, init_schema=True)
+    conn.close()
+
+    # Measure p95 latency across 20 pre-tool dispatches
+    latencies: list[float] = []
+    for _ in range(20):
+        t0 = time.perf_counter()
+        resp = dispatch_hook(
+            "pre-tool",
+            {"conversationId": "s-lat", "toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi"}}},
+            cfg=cfg,
+        )
+        latencies.append((time.perf_counter() - t0) * 1000.0)
+        assert resp == {"decision": "allow"}
+    latencies.sort()
+    p95 = latencies[int(len(latencies) * 0.95) - 1]
+    assert p95 < 20.0, f"Expected p95 < 20ms, got {p95:.2f}ms"
+
+    # Pending task correlation: ogy run -> session-start -> routing_decisions
+    conn = connect(cfg.db_path, init_schema=True)
+    try:
+        conn.execute("INSERT INTO tasks (task_id, repo_root, title, category) VALUES ('task-abc', ?, 'fix bug', 'bugfix_local')", (str(tmp_path),))
+    finally:
+        conn.close()
+
+    write_pending_task(
+        tmp_path,
+        pending_dir=cfg.stash_dir.parent / "pending_tasks",
+        task_id="task-abc",
+        decision={
+            "stage": "stage2_bandit",
+            "category": "bugfix_local",
+            "model": "gemini-4-neon",
+            "effort": "low",
+            "mode": "auto",
+            "features": {"has_stacktrace": True},
+        },
+        ttl_seconds=30.0,
+    )
+    dispatch_hook(
+        "session-start",
+        {"conversationId": "sess-corr", "workspacePaths": [str(tmp_path)], "modelName": "gemini-4-neon"},
+        cfg=cfg,
+    )
+    conn = connect(cfg.db_path, init_schema=True)
+    try:
+        srow = query_all(conn, "SELECT task_id FROM sessions WHERE session_id = 'sess-corr'")[0]
+        assert srow["task_id"] == "task-abc"
+        rd = query_all(conn, "SELECT * FROM routing_decisions WHERE session_id = 'sess-corr'")
+        assert len(rd) == 1
+        assert rd[0]["task_id"] == "task-abc"
+        assert rd[0]["stage"] == "stage2_bandit"
+    finally:
+        conn.close()
+
+    # Second session-start must NOT re-consume the already consumed pending task
+    dispatch_hook(
+        "session-start",
+        {"conversationId": "sess-corr-2", "workspacePaths": [str(tmp_path)]},
+        cfg=cfg,
+    )
+    conn = connect(cfg.db_path, init_schema=True)
+    try:
+        rd2 = query_all(conn, "SELECT * FROM routing_decisions WHERE session_id = 'sess-corr-2'")
+        assert len(rd2) == 0
+    finally:
+        conn.close()
 
 
 def test_hooks_fail_open_on_bad_stdin(monkeypatch, capsys) -> None:

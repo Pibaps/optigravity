@@ -40,8 +40,135 @@ def test_wal_pragmas_and_schema(tmp_path: Path) -> None:
             "routing_decisions",
             "quota_snapshots",
             "hook_events",
+            "prompt_history",
+            "subagent_runs",
         }
+        uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
+        assert uv == 2
         run_stop_maintenance(conn)
+    finally:
+        conn.close()
+
+
+def test_zero_ddl_locks_on_100_polls_and_readonly(tmp_path: Path) -> None:
+    import sqlite3
+
+    from ogy_core.storage import connect_readonly, ensure_schema
+
+    db_path = tmp_path / "ogy.db"
+    conn = connect(db_path, init_schema=True)
+    try:
+        # Install authorizer that rejects any DDL/WRITE once schema is at v2
+        ddl_or_writes = 0
+
+        def authorizer(action, arg1, arg2, dbname, source):
+            nonlocal ddl_or_writes
+            if action in (
+                sqlite3.SQLITE_CREATE_TABLE,
+                sqlite3.SQLITE_CREATE_VIEW,
+                sqlite3.SQLITE_DROP_VIEW,
+                sqlite3.SQLITE_CREATE_INDEX,
+                sqlite3.SQLITE_INSERT,
+                sqlite3.SQLITE_UPDATE,
+                sqlite3.SQLITE_DELETE,
+            ):
+                ddl_or_writes += 1
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorizer)
+        for _ in range(100):
+            ensure_schema(conn)
+        assert ddl_or_writes == 0
+    finally:
+        conn.close()
+
+    # 100 consecutive read-only polls must succeed without locking or allowing writes
+    for _ in range(100):
+        ro = connect_readonly(db_path)
+        try:
+            assert query_all(ro, "SELECT COUNT(*) AS c FROM sessions")[0]["c"] == 0
+        finally:
+            ro.close()
+
+
+def test_camelcase_statusline_and_gen_metadata_enrichment(tmp_path: Path) -> None:
+    import json
+    import sqlite3
+
+    from ogy_core.ingest import enrich_from_agy_dbs, ingest_statusline_payload
+
+    db_path = tmp_path / "ogy.db"
+    agy_dir = tmp_path / "agy-cli"
+    conv_dir = agy_dir / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = connect(db_path, init_schema=True)
+    try:
+        ingest_statusline_payload(
+            conn,
+            {
+                "conversationId": "sess-camel-db",
+                "modelName": "gemini-4-neon",
+                "stepIndex": 1,
+                "usage": {
+                    "inputTokens": 3_000,
+                    "cacheReadInputTokens": 12_000,
+                    "cacheCreationInputTokens": 500,
+                    "outputTokens": 250,
+                },
+                "contextWindow": {"usedTokens": 15_500, "maxTokens": 200_000},
+                "cost": {"totalUsd": 0.42},
+                "quota": {"gemini-5h": {"remainingFraction": 0.77, "resetInSeconds": 3600}},
+            },
+        )
+        trows = query_all(conn, "SELECT * FROM turns WHERE session_id = 'sess-camel-db'")
+        assert len(trows) == 1
+        assert trows[0]["input_tokens"] == 3_000
+        assert trows[0]["cache_read_tokens"] == 12_000
+        assert trows[0]["output_tokens"] == 250
+        assert trows[0]["context_window_used"] == 15_500
+
+        srows = query_all(conn, "SELECT total_cost_usd FROM sessions WHERE session_id = 'sess-camel-db'")
+        assert abs(float(srows[0]["total_cost_usd"]) - 0.42) < 1e-6
+
+        qrows = query_all(conn, "SELECT remaining_fraction FROM quota_snapshots WHERE session_id = 'sess-camel-db'")
+        assert len(qrows) == 1
+        assert abs(float(qrows[0]["remaining_fraction"]) - 0.77) < 1e-6
+
+        # Create mock conversations/<id>.db with gen_metadata
+        conv_db = conv_dir / "sess-camel-db.db"
+        c = sqlite3.connect(str(conv_db))
+        try:
+            c.execute("CREATE TABLE steps (step_index INTEGER, gen_metadata TEXT)")
+            c.execute(
+                "INSERT INTO steps VALUES (?, ?)",
+                (
+                    1,
+                    json.dumps({
+                        "usage": {"thinkingTokens": 4_500},
+                        "toolsSchemaTokens": 19_000,
+                        "ttftMs": 420,
+                    }),
+                ),
+            )
+            c.commit()
+        finally:
+            c.close()
+
+        res = enrich_from_agy_dbs(conn, "sess-camel-db", agy_dir)
+        assert res["conv_db_found"] is True
+        assert res["gen_metadata_enriched"] == 1
+
+        trow = query_all(conn, "SELECT thinking_tokens, tools_schema_tokens, ttft_ms FROM turns WHERE session_id = 'sess-camel-db'")[0]
+        assert trow["thinking_tokens"] == 4_500
+        assert trow["tools_schema_tokens"] == 19_000
+        assert trow["ttft_ms"] == 420
+
+        # W4 and W7 should now be unlocked
+        waste_ids = {f["waste_id"] for f in detect_waste(conn, session_id="sess-camel-db")}
+        assert 4 in waste_ids
+        assert 7 in waste_ids
     finally:
         conn.close()
 

@@ -16,6 +16,8 @@ from ogy_core.router import compute_reward
 from ogy_core.storage import (
     canonical_args_hash,
     connect,
+    connect_readonly,
+    consume_pending_task,
     ensure_session,
     query_all,
     run_stop_maintenance,
@@ -69,16 +71,45 @@ def _handle_session_start(payload: dict[str, Any], cfg: OgyConfig) -> dict[str, 
     model_id = normalize_model_id(str(payload.get("modelName") or "gemini-4-hydrogen"))
 
     if session_id:
+        pending = consume_pending_task(workspace, pending_dir=cfg.stash_dir.parent / "pending_tasks")
+        pending_task_id = str(pending.get("task_id") or "") if isinstance(pending, dict) else ""
+        pending_dec = pending.get("decision") if isinstance(pending, dict) and isinstance(pending.get("decision"), dict) else None
+
         conn = connect(cfg.db_path, init_schema=True)
         try:
             ensure_session(
                 conn,
                 session_id=session_id,
                 workspace_path=str(workspace),
+                task_id=pending_task_id or None,
                 initial_prompt=payload.get("lastUserInput"),
-                initial_model=model_id,
+                initial_model=(pending_dec.get("model") if pending_dec else None) or model_id,
+                initial_effort=(pending_dec.get("effort") if pending_dec else None),
+                initial_mode=(pending_dec.get("mode") if pending_dec else None),
                 transcript_path=payload.get("transcriptPath"),
             )
+            if pending_dec:
+                with write_tx(conn):
+                    conn.execute(
+                        """
+                        INSERT INTO routing_decisions (
+                          session_id, task_id, stage, detected_category, features_json,
+                          chosen_model, chosen_effort, chosen_mode, propensity, predicted_score
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            pending_task_id or None,
+                            str(pending_dec.get("stage") or "stage1_heuristic"),
+                            str(pending_dec.get("category") or "routine_code"),
+                            json.dumps(pending_dec.get("features") or {}, separators=(",", ":"), ensure_ascii=False),
+                            str(pending_dec.get("model") or model_id),
+                            str(pending_dec.get("effort") or "medium"),
+                            str(pending_dec.get("mode") or "auto"),
+                            float(pending_dec.get("propensity", 1.0)),
+                            pending_dec.get("predicted_score"),
+                        ),
+                    )
         finally:
             conn.close()
 
@@ -103,26 +134,39 @@ def _handle_pre_tool(payload: dict[str, Any], cfg: OgyConfig, t0: float) -> dict
     tool_name = str(tc.get("name") or "")
     tool_args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
 
-    conn = connect(cfg.db_path, init_schema=True)
+    ro_conn = None
+    if session_id and cfg.db_path.is_file():
+        try:
+            ro_conn = connect_readonly(cfg.db_path, timeout=0.5)
+        except Exception:
+            ro_conn = None
     try:
         resp = evaluate_pre_tool_firebreaks(
-            conn,
+            ro_conn,
             session_id=session_id,
             tool_name=tool_name,
             tool_args=tool_args,
             cfg=cfg,
         )
-        action = "overwrite" if "overwrite" in resp else (resp.get("decision") or "allow")
-        _record_hook_event(
-            conn,
-            session_id=session_id,
-            hook_type="PreToolUse",
-            action_taken=action,
-            latency_ms=(time.perf_counter() - t0) * 1000.0,
-        )
-        return resp
     finally:
-        conn.close()
+        if ro_conn is not None:
+            ro_conn.close()
+
+    action = "overwrite" if "overwrite" in resp else (resp.get("decision") or "allow")
+    # Only incur a SQLite write transaction when a firebreak actually intervened
+    if session_id and action != "allow":
+        w_conn = connect(cfg.db_path, init_schema=True)
+        try:
+            _record_hook_event(
+                w_conn,
+                session_id=session_id,
+                hook_type="PreToolUse",
+                action_taken=action,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+            )
+        finally:
+            w_conn.close()
+    return resp
 
 
 def _handle_post_tool(payload: dict[str, Any], cfg: OgyConfig) -> dict[str, Any]:
@@ -153,6 +197,22 @@ def _handle_post_tool(payload: dict[str, Any], cfg: OgyConfig) -> dict[str, Any]
             is_error=1 if err else 0,
             error_message=str(err) if err else None,
         )
+        if err:
+            ah = canonical_args_hash(tool_args)
+            rows = query_all(
+                conn,
+                "SELECT SUM(is_error) AS err_cnt FROM tool_calls WHERE session_id = ? AND args_hash = ?",
+                (session_id, ah),
+            )
+            err_cnt = int(rows[0]["err_cnt"] or 0) if rows else 0
+            if 1 <= err_cnt < cfg.firebreak_loop_threshold:
+                _record_hook_event(
+                    conn,
+                    session_id=session_id,
+                    hook_type="PostToolUse",
+                    action_taken="soft_warn",
+                    rule_name="retry_warning",
+                )
     finally:
         conn.close()
     return {}
@@ -176,12 +236,17 @@ def _handle_pre_invocation(payload: dict[str, Any], cfg: OgyConfig) -> dict[str,
             (session_id,),
         )
         if rows and float(rows[0]["total_cost_usd"] or 0.0) >= cfg.budget_hard_cap_usd:
+            msg = (
+                f"[ogy] Plafond budget atteint (${cfg.budget_hard_cap_usd:.2f})."
+                if cfg.language == "fr"
+                else f"[ogy] Session budget cap reached (${cfg.budget_hard_cap_usd:.2f})."
+            )
             return {
                 "terminationBehavior": "terminate",
                 "injectSteps": [
                     {
                         "errorMessage": {
-                            "userMessage": f"[ogy] Plafond budget atteint (${cfg.budget_hard_cap_usd:.2f})."
+                            "userMessage": msg
                         }
                     }
                 ],

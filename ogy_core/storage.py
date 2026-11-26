@@ -4,21 +4,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-INIT_PRAGMAS = (
-    "PRAGMA journal_mode = WAL;",
+CURRENT_SCHEMA_VERSION = 2
+
+CONN_PRAGMAS = (
     "PRAGMA synchronous = NORMAL;",
     "PRAGMA foreign_keys = ON;",
     "PRAGMA busy_timeout = 5000;",
-    "PRAGMA auto_vacuum = INCREMENTAL;",
-    "PRAGMA journal_size_limit = 67108864;",
     "PRAGMA temp_store = MEMORY;",
 )
+
+DB_INIT_PRAGMAS = (
+    "PRAGMA journal_mode = WAL;",
+    "PRAGMA auto_vacuum = INCREMENTAL;",
+    "PRAGMA journal_size_limit = 67108864;",
+)
+
+INIT_PRAGMAS = DB_INIT_PRAGMAS + CONN_PRAGMAS
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -162,10 +171,37 @@ CREATE TABLE IF NOT EXISTS hook_events (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
+CREATE TABLE IF NOT EXISTS prompt_history (
+  history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_root TEXT NOT NULL DEFAULT '',
+  session_id TEXT REFERENCES sessions(session_id) ON DELETE SET NULL,
+  prompt_text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS subagent_runs (
+  run_id TEXT PRIMARY KEY,
+  parent_session_id TEXT REFERENCES sessions(session_id) ON DELETE SET NULL,
+  tool_name TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  tier TEXT NOT NULL DEFAULT 'free',
+  step INTEGER NOT NULL DEFAULT 0,
+  max_steps INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'running',
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  thought_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0.0,
+  started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  ended_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_session_id);
 CREATE INDEX IF NOT EXISTS idx_turns_session_time ON turns(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_hash ON tool_calls(session_id, tool_name, args_hash);
 CREATE INDEX IF NOT EXISTS idx_quota_bucket_time ON quota_snapshots(bucket_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_prompt_history_repo_time ON prompt_history(repo_root, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs(parent_session_id, started_at DESC);
 
 DROP VIEW IF EXISTS v_session_kpis;
 CREATE VIEW v_session_kpis AS
@@ -258,11 +294,78 @@ def connect(db_path: Path | str, *, init_schema: bool = False) -> sqlite3.Connec
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    for pragma in INIT_PRAGMAS:
+    for pragma in CONN_PRAGMAS:
         conn.execute(pragma)
     if init_schema:
         ensure_schema(conn)
     return conn
+
+
+def connect_readonly(db_path: Path | str, *, timeout: float = 5.0) -> sqlite3.Connection:
+    """Open a SQLite connection strictly read-only (`mode=ro`, `query_only=ON`, zero DDL lock)."""
+    path = Path(db_path).resolve()
+    uri = f"{path.as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=timeout, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute("PRAGMA query_only = ON;")
+    return conn
+
+
+def pending_task_path(cwd: str | Path, pending_dir: Path) -> Path:
+    """Return deterministic pending-task correlation file path for a workspace."""
+    norm = os.path.normcase(str(Path(cwd).resolve()))
+    digest = hashlib.sha256(norm.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return pending_dir / f"{digest}.json"
+
+
+def write_pending_task(
+    cwd: str | Path,
+    *,
+    pending_dir: Path,
+    task_id: str,
+    decision: dict[str, Any],
+    ttl_seconds: float = 30.0,
+) -> Path:
+    """Write a short-lived correlation file for `ogy run` -> `session-start`."""
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    target = pending_task_path(cwd, pending_dir)
+    payload = {
+        "task_id": task_id,
+        "decision": decision,
+        "expires_at": time.time() + ttl_seconds,
+    }
+    tmp = target.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    tmp.replace(target)
+    return target
+
+
+def consume_pending_task(cwd: str | Path, *, pending_dir: Path) -> dict[str, Any] | None:
+    """Atomically consume a non-expired pending-task correlation file for `cwd`."""
+    target = pending_task_path(cwd, pending_dir)
+    if not target.is_file():
+        return None
+    claimed = target.with_suffix(f".claimed.{os.getpid()}")
+    try:
+        target.replace(claimed)
+    except OSError:
+        return None
+    try:
+        data = json.loads(claimed.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = None
+    finally:
+        try:
+            claimed.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if not isinstance(data, dict):
+        return None
+    expires_at = data.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or time.time() > float(expires_at):
+        return None
+    return data
 
 
 @contextmanager
@@ -293,12 +396,21 @@ def query_all(
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create tables, indexes, and views idempotently under BEGIN IMMEDIATE."""
+    """Create tables, indexes, and views idempotently via PRAGMA user_version (0 DDL lock when current)."""
+    row = conn.execute("PRAGMA user_version;").fetchone()
+    if row and int(row[0]) >= CURRENT_SCHEMA_VERSION:
+        return
+    for pragma in DB_INIT_PRAGMAS:
+        conn.execute(pragma)
     with write_tx(conn):
+        row2 = conn.execute("PRAGMA user_version;").fetchone()
+        if row2 and int(row2[0]) >= CURRENT_SCHEMA_VERSION:
+            return
         for stmt in SCHEMA_SQL.split(";"):
             s = stmt.strip()
             if s:
                 conn.execute(s + ";")
+        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION};")
 
 
 def run_stop_maintenance(conn: sqlite3.Connection) -> None:
@@ -733,3 +845,224 @@ def detect_waste(conn: sqlite3.Connection, *, session_id: str | None = None) -> 
         })
 
     return findings
+
+
+def record_prompt_history(
+    conn: sqlite3.Connection,
+    *,
+    repo_root: str,
+    prompt_text: str,
+    session_id: str | None = None,
+) -> None:
+    """Persist a user prompt into `prompt_history` (deduping immediate identical repeats)."""
+    cleaned = prompt_text.strip()
+    if not cleaned:
+        return
+    with write_tx(conn):
+        last = conn.execute(
+            "SELECT prompt_text FROM prompt_history WHERE repo_root = ? ORDER BY history_id DESC LIMIT 1",
+            (repo_root,),
+        ).fetchone()
+        if last and str(last["prompt_text"]) == cleaned:
+            return
+        sid_val = session_id
+        if sid_val:
+            exists = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1", (sid_val,)
+            ).fetchone()
+            if not exists:
+                sid_val = None
+        conn.execute(
+            "INSERT INTO prompt_history (repo_root, session_id, prompt_text, created_at) VALUES (?, ?, ?, ?)",
+            (repo_root, sid_val, cleaned, utc_now_iso()),
+        )
+
+
+def load_prompt_history(
+    conn: sqlite3.Connection,
+    *,
+    repo_root: str | None = None,
+    limit: int = 200,
+) -> list[str]:
+    """Load recent prompts ordered oldest-to-newest for composer Up/Down navigation."""
+    if repo_root is not None:
+        rows = query_all(
+            conn,
+            "SELECT prompt_text FROM prompt_history WHERE repo_root = ? ORDER BY history_id DESC LIMIT ?",
+            (repo_root, limit),
+        )
+    else:
+        rows = query_all(
+            conn,
+            "SELECT prompt_text FROM prompt_history ORDER BY history_id DESC LIMIT ?",
+            (limit,),
+        )
+    return [str(r["prompt_text"]) for r in reversed(rows)]
+
+
+def list_recent_sessions_meta(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+) -> dict[str, dict[str, Any]]:
+    """Return session metadata keyed by session_id for SessionPickerModal enrichment."""
+    rows = query_all(
+        conn,
+        """
+        SELECT
+          s.session_id,
+          s.initial_prompt,
+          s.initial_model,
+          s.started_at,
+          s.status,
+          COALESCE(k.turn_count, 0) AS turn_count,
+          COALESCE(k.turns_cost_usd, s.total_cost_usd, 0.0) AS cost_usd
+        FROM sessions s
+        LEFT JOIN v_session_kpis k ON k.session_id = s.session_id
+        ORDER BY s.started_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return {str(r["session_id"]): dict(r) for r in rows}
+
+
+def list_active_subagent_runs(
+    conn: sqlite3.Connection,
+    *,
+    parent_session_id: str | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Read recent subagent_runs rows for the TUI telemetry sidebar."""
+    if parent_session_id:
+        rows = query_all(
+            conn,
+            """
+            SELECT run_id, parent_session_id, tool_name, model_id, tier, step, max_steps,
+                   status, input_tokens, output_tokens, thought_tokens, cost_usd, started_at, ended_at
+            FROM subagent_runs
+            WHERE parent_session_id = ?
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (parent_session_id, limit),
+        )
+    else:
+        rows = query_all(
+            conn,
+            """
+            SELECT run_id, parent_session_id, tool_name, model_id, tier, step, max_steps,
+                   status, input_tokens, output_tokens, thought_tokens, cost_usd, started_at, ended_at
+            FROM subagent_runs
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    return [dict(r) for r in rows]
+
+
+def upsert_subagent_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    tool_name: str,
+    model_id: str,
+    tier: str = "free",
+    step: int = 0,
+    max_steps: int = 1,
+    status: str = "running",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    thought_tokens: int = 0,
+    cost_usd: float = 0.0,
+    parent_session_id: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+) -> None:
+    """Insert or update a `subagent_runs` row in real time (SQLite WAL)."""
+    now = started_at or utc_now_iso()
+    with write_tx(conn):
+        pid = parent_session_id
+        if pid:
+            exists = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1", (pid,)
+            ).fetchone()
+            if not exists:
+                pid = None
+        conn.execute(
+            """
+            INSERT INTO subagent_runs (
+              run_id, parent_session_id, tool_name, model_id, tier, step, max_steps,
+              status, input_tokens, output_tokens, thought_tokens, cost_usd, started_at, ended_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+              model_id = excluded.model_id,
+              tier = excluded.tier,
+              step = excluded.step,
+              max_steps = excluded.max_steps,
+              status = excluded.status,
+              input_tokens = excluded.input_tokens,
+              output_tokens = excluded.output_tokens,
+              thought_tokens = excluded.thought_tokens,
+              cost_usd = excluded.cost_usd,
+              ended_at = COALESCE(excluded.ended_at, subagent_runs.ended_at)
+            """,
+            (
+                run_id,
+                pid,
+                tool_name,
+                model_id,
+                tier,
+                int(step),
+                int(max_steps),
+                status,
+                int(input_tokens),
+                int(output_tokens),
+                int(thought_tokens),
+                float(cost_usd),
+                now,
+                ended_at,
+            ),
+        )
+
+
+def get_subagent_spend_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return aggregate Gemini API subagent metrics (strictly separate from OAuth quota)."""
+    rows = query_all(
+        conn,
+        """
+        SELECT
+          COUNT(*) AS runs,
+          COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0) AS active_runs,
+          COALESCE(SUM(CASE WHEN tier = 'free' THEN 1 ELSE 0 END), 0) AS free_runs,
+          COALESCE(SUM(CASE WHEN tier != 'free' THEN 1 ELSE 0 END), 0) AS tier1_runs,
+          COALESCE(SUM(input_tokens), 0) AS input_tokens,
+          COALESCE(SUM(output_tokens), 0) AS output_tokens,
+          COALESCE(SUM(thought_tokens), 0) AS thought_tokens,
+          COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+        FROM subagent_runs
+        """,
+    )
+    if not rows:
+        return {
+            "runs": 0,
+            "active_runs": 0,
+            "free_runs": 0,
+            "tier1_runs": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thought_tokens": 0,
+            "cost_usd": 0.0,
+        }
+    r = rows[0]
+    return {
+        "runs": int(r["runs"] or 0),
+        "active_runs": int(r["active_runs"] or 0),
+        "free_runs": int(r["free_runs"] or 0),
+        "tier1_runs": int(r["tier1_runs"] or 0),
+        "input_tokens": int(r["input_tokens"] or 0),
+        "output_tokens": int(r["output_tokens"] or 0),
+        "thought_tokens": int(r["thought_tokens"] or 0),
+        "cost_usd": float(r["cost_usd"] or 0.0),
+    }

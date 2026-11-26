@@ -22,6 +22,54 @@ from ogy_core.storage import (
 USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
 
 
+def _pick_int(d: dict[str, Any], *keys: str) -> int:
+    """Return the first non-None integer value found under any of `keys`."""
+    for k in keys:
+        val = d.get(k)
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
+def _pick_int_or_none(d: dict[str, Any], *keys: str) -> int | None:
+    """Return the first non-None integer value found under any of `keys`, or None."""
+    for k in keys:
+        val = d.get(k)
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _pick_float(d: dict[str, Any], *keys: str) -> float:
+    """Return the first non-None float value found under any of `keys`."""
+    for k in keys:
+        val = d.get(k)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def _pick_float_or_none(d: dict[str, Any], *keys: str) -> float | None:
+    """Return the first non-None float value found under any of `keys`, or None."""
+    for k in keys:
+        val = d.get(k)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 def strip_user_request_envelope(text: str) -> str:
     """Strip <USER_REQUEST>...</USER_REQUEST> wrapper if present."""
     if not text:
@@ -58,13 +106,15 @@ def ingest_statusline_payload(
     enterprise_cache: bool = False,
 ) -> None:
     """Ingest real-time statusLine JSON payload into sessions, turns, and quota_snapshots."""
-    session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
+    session_id = str(
+        payload.get("conversationId") or payload.get("session_id") or payload.get("conversation_id") or ""
+    ).strip()
     if not session_id:
         return
 
-    ws_paths = payload.get("workspacePaths")
+    ws_paths = payload.get("workspacePaths") or payload.get("workspace_paths")
     workspace = ws_paths[0] if isinstance(ws_paths, list) and ws_paths else str(payload.get("workspace_path") or "")
-    model_raw = str(payload.get("modelName") or payload.get("model") or "gemini-4-hydrogen")
+    model_raw = str(payload.get("modelName") or payload.get("model_name") or payload.get("model") or "gemini-4-hydrogen")
     model_id = normalize_model_id(model_raw)
 
     ensure_session(
@@ -72,37 +122,67 @@ def ingest_statusline_payload(
         session_id=session_id,
         workspace_path=workspace,
         initial_model=model_id,
-        transcript_path=payload.get("transcriptPath"),
+        transcript_path=payload.get("transcriptPath") or payload.get("transcript_path"),
     )
 
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else payload
-    input_tokens = int(usage.get("input_tokens") or 0)
-    cache_read = int(usage.get("cache_read_input_tokens") or usage.get("cache_read_tokens") or 0)
-    cache_create = int(usage.get("cache_creation_input_tokens") or usage.get("cache_creation_tokens") or 0)
-    output_tokens = int(usage.get("output_tokens") or 0)
+    input_tokens = _pick_int(usage, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
+    cache_read = _pick_int(
+        usage,
+        "cache_read_input_tokens",
+        "cache_read_tokens",
+        "cacheReadInputTokens",
+        "cacheReadTokens",
+        "cachedReadTokens",
+    )
+    cache_create = _pick_int(
+        usage,
+        "cache_creation_input_tokens",
+        "cache_creation_tokens",
+        "cacheCreationInputTokens",
+        "cacheCreationTokens",
+        "cachedWriteTokens",
+    )
+    output_tokens = _pick_int(usage, "output_tokens", "outputTokens", "completion_tokens", "completionTokens")
+    thinking_tokens = _pick_int(
+        usage, "thinking_tokens", "thinkingTokens", "thought_tokens", "thoughtTokens", "thoughts_token_count"
+    )
 
-    ctx_win = payload.get("context_window") if isinstance(payload.get("context_window"), dict) else {}
-    ctx_used = ctx_win.get("used") or payload.get("context_window_used")
+    ctx_win = (
+        payload.get("context_window")
+        if isinstance(payload.get("context_window"), dict)
+        else (payload.get("contextWindow") if isinstance(payload.get("contextWindow"), dict) else {})
+    )
+    ctx_used = _pick_int_or_none(ctx_win, "used", "usedTokens", "used_tokens")
+    if ctx_used is None:
+        ctx_used = _pick_int_or_none(payload, "context_window_used", "contextWindowUsed")
     if ctx_used is None and (input_tokens + cache_read + cache_create) > 0:
         ctx_used = input_tokens + cache_read + cache_create
-    ctx_max = ctx_win.get("max") or payload.get("context_window_max")
-    exceeds_200k = 1 if payload.get("exceeds_200k_tokens") else 0
+    ctx_max = _pick_int_or_none(ctx_win, "max", "maxTokens", "max_tokens")
+    if ctx_max is None:
+        ctx_max = _pick_int_or_none(payload, "context_window_max", "contextWindowMax")
+    exceeds_200k = 1 if (payload.get("exceeds_200k_tokens") or payload.get("exceeds200kTokens")) else 0
 
     cost_obj = payload.get("cost") if isinstance(payload.get("cost"), dict) else {}
-    total_usd = float(cost_obj.get("total_usd") or 0.0)
-    subagent_usd = float(cost_obj.get("subagent_usd") or 0.0)
+    total_usd = _pick_float(cost_obj, "total_usd", "totalUsd", "total_cost_usd", "totalCostUsd") or _pick_float(
+        payload, "total_cost_usd", "totalCostUsd", "total_usd", "totalUsd"
+    )
+    subagent_usd = _pick_float(cost_obj, "subagent_usd", "subagentUsd") or _pick_float(
+        payload, "subagent_cost_usd", "subagentCostUsd", "subagent_usd", "subagentUsd"
+    )
 
-    step_index = int(payload.get("stepIdx") or payload.get("step_index") or 0)
+    step_index = _pick_int(payload, "stepIdx", "step_index", "stepIndex")
     est_cost = estimate_turn_cost(
         model_id,
         input_tokens=input_tokens,
         cache_read_tokens=cache_read,
         cache_creation_tokens=cache_create,
         output_tokens=output_tokens,
+        thinking_tokens=thinking_tokens,
         enterprise=enterprise_cache,
     )
 
-    if any((input_tokens, cache_read, cache_create, output_tokens)):
+    if any((input_tokens, cache_read, cache_create, output_tokens, thinking_tokens)):
         upsert_turn(
             conn,
             session_id=session_id,
@@ -112,8 +192,10 @@ def ingest_statusline_payload(
             cache_read_tokens=cache_read,
             cache_creation_tokens=cache_create,
             output_tokens=output_tokens,
-            context_window_used=int(ctx_used) if ctx_used is not None else None,
-            context_window_max=int(ctx_max) if ctx_max is not None else None,
+            thinking_tokens=thinking_tokens,
+            thinking_is_estimated=0 if thinking_tokens > 0 else 1,
+            context_window_used=ctx_used,
+            context_window_max=ctx_max,
             exceeds_200k=exceeds_200k,
             estimated_cost_usd=est_cost,
             data_source="statusline",
@@ -134,10 +216,14 @@ def ingest_statusline_payload(
     quota = payload.get("quota")
     if isinstance(quota, dict):
         now = utc_now_iso()
+        plan_tier = payload.get("plan_tier") or payload.get("planTier")
         with write_tx(conn):
             for bucket_id, qinfo in quota.items():
                 if not isinstance(qinfo, dict):
                     continue
+                rem = _pick_float_or_none(qinfo, "remaining_fraction", "remainingFraction")
+                reset_t = qinfo.get("reset_time") or qinfo.get("resetTime")
+                reset_s = _pick_int_or_none(qinfo, "reset_in_seconds", "resetInSeconds")
                 conn.execute(
                     """
                     INSERT INTO quota_snapshots (
@@ -147,10 +233,10 @@ def ingest_statusline_payload(
                     (
                         session_id,
                         str(bucket_id),
-                        qinfo.get("remaining_fraction"),
-                        qinfo.get("reset_time"),
-                        qinfo.get("reset_in_seconds"),
-                        payload.get("plan_tier"),
+                        rem,
+                        reset_t,
+                        reset_s,
+                        plan_tier,
                         now,
                     ),
                 )
@@ -363,9 +449,122 @@ def enrich_from_agy_dbs(
     c_conn = open_agy_db_readonly(conv_db)
     if c_conn is not None:
         result["conv_db_found"] = True
-        c_conn.close()
+        enriched = 0
+        try:
+            enriched = _enrich_from_conv_gen_metadata(conn, c_conn, session_id)
+        except Exception:
+            enriched = 0
+        finally:
+            c_conn.close()
+        result["gen_metadata_enriched"] = enriched
 
     return result
+
+
+def _parse_gen_metadata_blob(raw: Any) -> dict[str, Any] | None:
+    """Decode a gen_metadata JSON text/bytes column safely."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _enrich_from_conv_gen_metadata(
+    conn: sqlite3.Connection,
+    c_conn: sqlite3.Connection,
+    session_id: str,
+) -> int:
+    """Best-effort read-only decode of gen_metadata from conversations/<id>.db."""
+    tables = [
+        r["name"]
+        for r in c_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        if r["name"] and not str(r["name"]).startswith("sqlite_")
+    ]
+    enriched = 0
+    for tbl in tables:
+        try:
+            cols = {r["name"] for r in c_conn.execute(f'PRAGMA table_info("{tbl}");').fetchall()}
+        except sqlite3.Error:
+            continue
+        meta_col = next((c for c in ("gen_metadata", "genMetadata", "generation_metadata") if c in cols), None)
+        if not meta_col:
+            continue
+        step_col = next((c for c in ("step_index", "stepIdx", "step_idx", "turn_index", "idx") if c in cols), None)
+        select_cols = f'"{meta_col}"' + (f', "{step_col}"' if step_col else "")
+        try:
+            rows = c_conn.execute(f'SELECT {select_cols} FROM "{tbl}" WHERE "{meta_col}" IS NOT NULL').fetchall()
+        except sqlite3.Error:
+            continue
+
+        for idx, row in enumerate(rows):
+            meta = _parse_gen_metadata_blob(row[0])
+            if not meta:
+                continue
+            usage = meta.get("usage") if isinstance(meta.get("usage"), dict) else meta
+            think = _pick_int_or_none(
+                usage,
+                "thinking_tokens",
+                "thinkingTokens",
+                "thoughts_token_count",
+                "thoughtsTokenCount",
+                "thought_tokens",
+                "thoughtTokens",
+            )
+            tools_schema = _pick_int_or_none(
+                meta,
+                "tools_schema_tokens",
+                "toolsSchemaTokens",
+                "tool_schema_tokens",
+                "toolSchemaTokens",
+            )
+            if tools_schema is None and usage is not meta:
+                tools_schema = _pick_int_or_none(
+                    usage, "tools_schema_tokens", "toolsSchemaTokens", "tool_schema_tokens", "toolSchemaTokens"
+                )
+            ttft = _pick_int_or_none(meta, "ttft_ms", "ttftMs", "time_to_first_token_ms", "timeToFirstTokenMs")
+            if think is None and tools_schema is None and ttft is None:
+                continue
+
+            step_idx = idx
+            if step_col and row[1] is not None:
+                try:
+                    step_idx = int(row[1])
+                except (TypeError, ValueError):
+                    step_idx = idx
+            elif "step_index" in meta or "stepIdx" in meta:
+                step_idx = _pick_int(meta, "step_index", "stepIdx")
+
+            with write_tx(conn):
+                cur = conn.execute(
+                    """
+                    UPDATE turns
+                    SET thinking_tokens = CASE
+                          WHEN ? IS NOT NULL AND ? > 0 THEN ?
+                          ELSE thinking_tokens
+                        END,
+                        thinking_is_estimated = CASE
+                          WHEN ? IS NOT NULL AND ? > 0 THEN 0
+                          ELSE thinking_is_estimated
+                        END,
+                        tools_schema_tokens = COALESCE(?, tools_schema_tokens),
+                        ttft_ms = COALESCE(?, ttft_ms)
+                    WHERE session_id = ? AND step_index = ?
+                    """,
+                    (think, think, think, think, think, tools_schema, ttft, session_id, step_idx),
+                )
+                if cur.rowcount > 0:
+                    enriched += 1
+    return enriched
 
 
 def ingest_acp_turn(

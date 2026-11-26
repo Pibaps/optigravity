@@ -13,8 +13,8 @@ from typing import Any
 
 from ogy_core.config import load_config
 from ogy_core.context_health import assess_context_health
-from ogy_core.ingest import ingest_statusline_payload
-from ogy_core.storage import INIT_PRAGMAS, ensure_schema
+from ogy_core.ingest import _pick_float, _pick_int, ingest_statusline_payload
+from ogy_core.storage import INIT_PRAGMAS, connect_readonly, ensure_schema
 
 
 def _format_tokens(n: int) -> str:
@@ -39,34 +39,12 @@ def _should_persist_snapshot(state_file: Path, debounce_s: float) -> bool:
         return False
 
 
-def _pick_int(d: dict[str, Any], *keys: str) -> int:
-    for k in keys:
-        val = d.get(k)
-        if val is not None:
-            try:
-                return int(val)
-            except (TypeError, ValueError):
-                pass
-    return 0
-
-
-def _pick_float(d: dict[str, Any], *keys: str) -> float:
-    for k in keys:
-        val = d.get(k)
-        if val is not None:
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                pass
-    return 0.0
-
-
 def _read_db_fallback(db_path: Path, session_id: str) -> tuple[int, int, int, int, float, int]:
     """Return (in_tok, cr_tok, cc_tok, ctx_used, total_usd, turn_count) from ogy.db."""
     if not db_path.is_file():
         return 0, 0, 0, 0, 0.0, 0
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.25)
+        conn = connect_readonly(db_path, timeout=0.25)
         try:
             if session_id:
                 row = conn.execute(
