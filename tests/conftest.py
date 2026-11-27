@@ -71,6 +71,7 @@ def make_tui_app(tmp_path: Path) -> Callable[..., OptigravityApp]:
         ogy_config: OgyConfig | None = None,
         cwd: Path | None = None,
         lang: str = "fr",
+        tui_theme: str | None = None,
         auto_connect: bool = True,
         initial_model: str | None = None,
         initial_effort: str | None = None,
@@ -98,6 +99,7 @@ def make_tui_app(tmp_path: Path) -> Callable[..., OptigravityApp]:
             auto_connect=auto_connect,
             injected_agent_conn=injected_agent_conn,
             lang=lang,
+            tui_theme=tui_theme,
             initial_model=initial_model,
             initial_effort=initial_effort,
             initial_prompt=initial_prompt,
@@ -116,6 +118,7 @@ def make_seeded_tui_app(tmp_path: Path, make_tui_app: Callable[..., OptigravityA
         scenario: str | None = "nominal_stream",
         injected_agent_conn: Any = None,
         lang: str = "en",
+        tui_theme: str | None = None,
         auto_connect: bool = True,
     ) -> OptigravityApp:
         cfg = load_config()
@@ -160,12 +163,15 @@ def make_seeded_tui_app(tmp_path: Path, make_tui_app: Callable[..., OptigravityA
         finally:
             conn.close()
 
+        ws_dir = tmp_path / "optigravity"
+        ws_dir.mkdir(parents=True, exist_ok=True)
         return make_tui_app(
             scenario=scenario,
             injected_agent_conn=injected_agent_conn,
             ogy_config=cfg,
-            cwd=tmp_path,
+            cwd=ws_dir,
             lang=lang,
+            tui_theme=tui_theme,
             auto_connect=auto_connect,
         )
 

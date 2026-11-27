@@ -187,3 +187,40 @@ def test_snapshot_handoff_review_modal(snap_compare: Any, make_seeded_tui_app: A
     with time_machine.travel(FROZEN_TIME, tick=False):
         app = make_seeded_tui_app(injected_agent_conn=FakeAgentConn(), lang="en")
         assert snap_compare(app, terminal_size=(120, 36), run_before=_run_before)
+
+
+@pytest.mark.snapshot
+def test_snapshot_light_theme_welcome(snap_compare: Any, make_seeded_tui_app: Any) -> None:
+    with time_machine.travel(FROZEN_TIME, tick=False):
+        app = make_seeded_tui_app(injected_agent_conn=FakeAgentConn(), lang="en", tui_theme="light")
+        assert snap_compare(app, terminal_size=(120, 36), run_before=_settle)
+
+
+@pytest.mark.snapshot
+def test_snapshot_search_and_queue_bar(snap_compare: Any, make_seeded_tui_app: Any) -> None:
+    async def _run_before(pilot: Any) -> None:
+        from textual.widgets import Input
+
+        app = pilot.app
+        await _settle(pilot)
+        await app._on_acp_event(
+            AgentMessageEvent(
+                "acp-sess-1",
+                "Here is the fix:\n```python\ndef optimize(x):\n    return x * 10\n```\n",
+            )
+        )
+        tr = app.get_active_transcript()
+        if tr is not None:
+            await tr.close_active_message()
+        app._set_working(False)
+        # Show queued prompt bar and active Ctrl+F transcript search bar
+        app.registry.enqueue_prompt("acp-sess-1", "Now run the full test suite")
+        app._refresh_queue_bar()
+        app.action_open_transcript_search()
+        app.query_one("#transcript-search-input", Input).value = "optimize"
+        await pilot.pause(0.1)
+        await _settle(pilot)
+
+    with time_machine.travel(FROZEN_TIME, tick=False):
+        app = make_seeded_tui_app(injected_agent_conn=FakeAgentConn(), lang="en")
+        assert snap_compare(app, terminal_size=(120, 36), run_before=_run_before)

@@ -148,15 +148,25 @@ def load_local_transcript_entries(db_path: Path, session_id: str) -> list[dict[s
     return entries
 
 
+@dataclass(frozen=True, slots=True)
+class QueuedPrompt:
+    """A prompt queued while the agent is busy completing the active turn."""
+
+    text: str
+    display_text: str
+    extra_blocks: tuple[Any, ...] = ()
+
+
 class SessionRegistry:
-    """Tracks isolated per-session telemetry state, routing flags, and pending prompt queues."""
+    """Tracks isolated per-session telemetry state, routing flags, drafts, and pending prompt queues."""
 
     def __init__(self) -> None:
         self.sessions: dict[str, SessionTelemetryState] = {}
         self.active_session_id: str | None = None
         self.routed_sessions: set[str] = set()
         self.manual_override_sessions: set[str] = set()
-        self.prompt_queues: dict[str, deque[str]] = {}
+        self.prompt_queues: dict[str, deque[QueuedPrompt]] = {}
+        self.drafts: dict[str, str] = {}
         self.latest_snapshot: TelemetrySnapshot = TelemetrySnapshot()
 
     def ensure(
@@ -198,14 +208,57 @@ class SessionRegistry:
     def mark_manual_override(self, session_id: str) -> None:
         self.manual_override_sessions.add(session_id)
 
-    def enqueue_prompt(self, session_id: str, text: str) -> None:
-        self.prompt_queues.setdefault(session_id, deque()).append(text)
+    def save_draft(self, session_id: str | None, text: str) -> None:
+        if session_id:
+            if text:
+                self.drafts[session_id] = text
+            else:
+                self.drafts.pop(session_id, None)
 
-    def pop_prompt(self, session_id: str) -> str | None:
+    def get_draft(self, session_id: str | None) -> str:
+        if not session_id:
+            return ""
+        return self.drafts.get(session_id, "")
+
+    def enqueue_prompt(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        display_text: str | None = None,
+        extra_blocks: list[Any] | None = None,
+    ) -> int:
+        q = self.prompt_queues.setdefault(session_id, deque())
+        q.append(QueuedPrompt(text=text, display_text=display_text or text, extra_blocks=tuple(extra_blocks or ())))
+        return len(q)
+
+    def pop_prompt(self, session_id: str) -> QueuedPrompt | None:
         q = self.prompt_queues.get(session_id)
         if q:
             return q.popleft()
         return None
+
+    def peek_prompt(self, session_id: str) -> QueuedPrompt | None:
+        q = self.prompt_queues.get(session_id)
+        if q:
+            return q[0]
+        return None
+
+    def queue_len(self, session_id: str | None) -> int:
+        if not session_id:
+            return 0
+        q = self.prompt_queues.get(session_id)
+        return len(q) if q else 0
+
+    def clear_queue(self, session_id: str | None) -> int:
+        if not session_id:
+            return 0
+        q = self.prompt_queues.get(session_id)
+        if not q:
+            return 0
+        n = len(q)
+        q.clear()
+        return n
 
     def min_quota_fraction(self) -> float | None:
         """Return minimum remaining_fraction from the latest non-blocking telemetry snapshot."""

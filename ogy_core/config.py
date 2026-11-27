@@ -32,6 +32,7 @@ class OgyConfig:
     isolated_profile_root: Path | None = None
     backups_dir: Path | None = None
     tui_enter_behavior: str = "submit"
+    tui_theme: str = "dark"
     firebreak_file_max_bytes: int = 24_576
     firebreak_doc_max_bytes: int = 49_152
     firebreak_data_max_bytes: int = 8_192
@@ -126,6 +127,9 @@ def load_config(config_path: Path | None = None) -> OgyConfig:
     enter_raw = str(tui_cfg.get("enter_behavior", "submit")).strip().lower()
     tui_enter_behavior = enter_raw if enter_raw in ("submit", "newline") else "submit"
 
+    theme_raw = str(tui_cfg.get("theme", "dark")).strip().lower()
+    tui_theme = theme_raw if theme_raw in ("dark", "light", "high-contrast") else "dark"
+
     priv_raw = str(sub_cfg.get("privacy_mode", "tier1_only")).strip().lower()
     subagents_privacy_mode = priv_raw if priv_raw in ("tier1_only", "free_first", "disabled") else "tier1_only"
 
@@ -148,6 +152,7 @@ def load_config(config_path: Path | None = None) -> OgyConfig:
         isolated_profile_root=isolated_profile_root,
         backups_dir=backups_dir,
         tui_enter_behavior=tui_enter_behavior,
+        tui_theme=tui_theme,
         firebreak_file_max_bytes=int(hooks_cfg.get("file_max_bytes", 24_576)),
         firebreak_doc_max_bytes=int(hooks_cfg.get("doc_max_bytes", 49_152)),
         firebreak_data_max_bytes=int(hooks_cfg.get("data_max_bytes", 8_192)),

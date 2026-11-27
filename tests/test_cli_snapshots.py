@@ -36,11 +36,13 @@ from ogy_subagents.router import seconds_until_midnight_pt
 
 
 def _normalize_cli_output(text: str, tmp_path: Path) -> str:
-    """Scrub ephemeral tmp_path, hashes, timings, and platform path separators for deterministic syrupy snapshots."""
+    """Scrub ephemeral tmp_path, hashes, timings, agy_binary path, link type, and platform separators for deterministic syrupy snapshots."""
     out = text.replace(str(tmp_path), "<TMP>").replace(tmp_path.as_posix(), "<TMP>")
     out = out.replace("\\", "/")
     out = re.sub(r"[0-9a-f]{12,64}", "<HEX>", out)
     out = re.sub(r"\d+\.\d+ ms", "<MS> ms", out)
+    out = re.sub(r"^(agy_binary\s*:\s*).*$", r"\1<AGY_BIN>", out, flags=re.MULTILINE)
+    out = re.sub(r"(?:symlink|hardlink) OK", "<LINK> OK", out)
     return out
 
 
@@ -339,7 +341,7 @@ def test_syrupy_statusline_ansi_and_no_color(monkeypatch: pytest.MonkeyPatch, sn
 
 def test_syrupy_firebreak_refusal_and_handoff(tmp_path: Path, snapshot: Any) -> None:
     big_file = tmp_path / "big_module.py"
-    big_file.write_text("\n".join(f"x_{i} = {i}" for i in range(2500)) + "\n", encoding="utf-8")
+    big_file.write_bytes(("\n".join(f"x_{i} = {i}" for i in range(2500)) + "\n").encode("utf-8"))
 
     cfg = load_config()
     verdict = evaluate_pre_tool_firebreaks(
@@ -376,6 +378,7 @@ def test_syrupy_v31_backup_restore_and_doctor_modes(
     (shared_gemini / "antigravity-cli").mkdir(parents=True, exist_ok=True)
     (shared_gemini / "antigravity-cli" / "settings.json").write_text('{"theme":"dark"}\n', encoding="utf-8")
     (shared_gemini / "oauth_creds.json").write_text('{"token":"fake"}\n', encoding="utf-8")
+    monkeypatch.setattr("ogy_cli.main.shutil.which", lambda cmd: "/usr/local/bin/agy" if cmd == "agy" else None)
 
     with time_machine.travel("2026-11-15T15:00:00Z", tick=False):
         # 1. Shared mode init + doctor + backup --list + restore --dry-run

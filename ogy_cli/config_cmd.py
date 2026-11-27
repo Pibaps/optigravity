@@ -27,6 +27,7 @@ CONFIG_SCHEMA: dict[str, tuple[str, Any, tuple[Any, ...] | None, str | None]] = 
     "pricing.enterprise_cache": ("bool", False, None, None),
     "budget.hard_cap_usd": ("float_opt", None, None, None),
     "tui.enter_behavior": ("str", "submit", ("submit", "newline"), None),
+    "tui.theme": ("str", "dark", ("dark", "light", "high-contrast"), None),
     "subagents.privacy_mode": ("str", "tier1_only", ("tier1_only", "free_first", "disabled"), None),
     "subagents.fallback_to_tier1": ("bool", True, None, None),
     "subagents.default_model": ("str", "gemini-3.5-flash-lite", None, None),
@@ -65,7 +66,8 @@ def render_default_config_toml(
         "[budget]\n"
         "# hard_cap_usd = 5.0  # Optional hard cap per session\n\n"
         "[tui]\n"
-        'enter_behavior = "submit"  # "submit" or "newline"\n\n'
+        'enter_behavior = "submit"  # "submit" or "newline"\n'
+        'theme = "dark"  # "dark", "light", or "high-contrast"\n\n'
         "[subagents]\n"
         f'privacy_mode = "{privacy_mode}"  # "tier1_only" (recommended for private code), "free_first", or "disabled"\n'
         "fallback_to_tier1 = true  # Auto-fallback Free Tier -> Tier 1 on 429 RPD\n"

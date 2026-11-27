@@ -267,13 +267,93 @@ def classify_exploration_kind(event: ToolCallEvent) -> str | None:
     return None
 
 
+class WelcomeCard(Vertical):
+    """Compact empty-state onboarding card shown in a fresh session until the first message arrives."""
+
+    def __init__(
+        self,
+        *,
+        version: str = "0.2.0",
+        workspace: str = ".",
+        branch: str = "",
+        profile: str = "shared",
+        subagents: str = "tier1_only",
+        lang: str = "fr",
+    ) -> None:
+        super().__init__(classes="welcome-card")
+        self.lang = lang
+        self._version = version
+        self._workspace = workspace
+        self._branch = branch
+        self._profile = profile
+        self._subagents = subagents
+
+    def compose(self) -> ComposeResult:
+        branch_tag = f" ({self._branch})" if self._branch else ""
+        yield Static(
+            t(self.lang, "welcome_title", version=self._version),
+            classes="welcome-title",
+            markup=False,
+        )
+        yield Static(
+            t(
+                self.lang,
+                "welcome_meta",
+                workspace=self._workspace,
+                branch=branch_tag,
+                profile=self._profile,
+                subagents=self._subagents,
+            ),
+            classes="welcome-meta",
+            markup=False,
+        )
+        yield Static(
+            t(self.lang, "welcome_tips"),
+            classes="welcome-tips",
+            markup=False,
+        )
+
+    def update_meta(
+        self,
+        *,
+        branch: str | None = None,
+        lang: str | None = None,
+    ) -> None:
+        if branch is not None:
+            self._branch = branch
+        if lang is not None:
+            self.lang = lang
+        if not self.is_mounted:
+            return
+        branch_tag = f" ({self._branch})" if self._branch else ""
+        self.query_one(".welcome-title", Static).update(
+            t(self.lang, "welcome_title", version=self._version)
+        )
+        self.query_one(".welcome-meta", Static).update(
+            t(
+                self.lang,
+                "welcome_meta",
+                workspace=self._workspace,
+                branch=branch_tag,
+                profile=self._profile,
+                subagents=self._subagents,
+            )
+        )
+        self.query_one(".welcome-tips", Static).update(t(self.lang, "welcome_tips"))
+
+
 class AssistantMessage(Vertical):
-    """Streamed assistant Markdown response with 200K plain-text guardrail and raw Markdown copy."""
+    """Streamed assistant Markdown response with 200K plain-text guardrail and raw Markdown/code copy."""
 
     class CopyRequested(Message):
         def __init__(self, raw_text: str) -> None:
             super().__init__()
             self.raw_text = raw_text
+
+    class CopyCodeRequested(Message):
+        def __init__(self, raw_code: str) -> None:
+            super().__init__()
+            self.raw_code = raw_code
 
     def __init__(self, *, lang: str = "fr") -> None:
         super().__init__()
@@ -284,12 +364,27 @@ class AssistantMessage(Vertical):
         self._link_cleaner = _StreamingLinkCleaner()
         self._fallback_static: Static | None = None
         self._truncated: bool = False
+        self._copy_code_btn: Button | None = None
 
     def compose(self) -> ComposeResult:
         self._md_widget = Markdown("", parser_factory=create_safe_markdown_parser)
         yield self._md_widget
         with Horizontal(classes="msg-toolbar"):
+            self._copy_code_btn = Button(t(self.lang, "copy_code_btn"), classes="copy-code-btn")
+            self._copy_code_btn.display = False
+            yield self._copy_code_btn
             yield Button(t(self.lang, "copy_btn"), classes="copy-md-btn")
+
+    def _sync_code_button(self) -> None:
+        if self._copy_code_btn is not None:
+            self._copy_code_btn.display = bool(self.extract_code_blocks())
+
+    def apply_lang(self, lang: str) -> None:
+        self.lang = lang
+        if self.is_mounted:
+            self.query_one(".copy-md-btn", Button).label = t(lang, "copy_btn")
+            if self._copy_code_btn is not None:
+                self._copy_code_btn.label = t(lang, "copy_code_btn")
 
     async def append_chunk(self, chunk: str) -> None:
         if not chunk:
@@ -309,6 +404,7 @@ class AssistantMessage(Vertical):
             )
             self._fallback_static = Static(preview, classes="raw-text-fallback", markup=False)
             await self.mount(self._fallback_static, before=0)
+            self._sync_code_button()
             return
 
         if self._md_widget is None:
@@ -318,6 +414,8 @@ class AssistantMessage(Vertical):
         cleaned = self._link_cleaner.feed(chunk)
         if cleaned:
             await self._stream.write(cleaned)
+        if "```" in chunk:
+            self._sync_code_button()
 
     async def finish_stream(self) -> None:
         tail = self._link_cleaner.flush()
@@ -335,6 +433,7 @@ class AssistantMessage(Vertical):
                 await stream.stop()
             except Exception:
                 pass
+        self._sync_code_button()
 
     def extract_code_blocks(self) -> list[str]:
         """Extract raw un-wrapped fenced code block bodies from `raw_markdown`."""
@@ -349,6 +448,12 @@ class AssistantMessage(Vertical):
     @on(Button.Pressed, ".copy-md-btn")
     def _on_copy_pressed(self) -> None:
         self.post_message(self.CopyRequested(self.raw_markdown))
+
+    @on(Button.Pressed, ".copy-code-btn")
+    def _on_copy_code_pressed(self) -> None:
+        blocks = self.extract_code_blocks()
+        if blocks:
+            self.post_message(self.CopyCodeRequested(blocks[-1]))
 
 
 class ThoughtBlock(Collapsible):
@@ -539,6 +644,7 @@ class SessionTranscript(VerticalScroll):
         lang: str = "fr",
         verbosity: str = "low",
         on_persist: Callable[[str, str, str], None] | None = None,
+        welcome_info: dict[str, str] | None = None,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
@@ -546,6 +652,8 @@ class SessionTranscript(VerticalScroll):
         self.lang = lang
         self.verbosity = verbosity  # "low" | "high"
         self._on_persist = on_persist
+        self._welcome_info = welcome_info
+        self._welcome_card: WelcomeCard | None = None
 
         self._has_unread: bool = False
         self._has_conversation_content: bool = False
@@ -558,9 +666,36 @@ class SessionTranscript(VerticalScroll):
         self._active_group: ActivityGroup | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         self._grouped_tools: dict[str, ActivityGroup] = {}
+        self._search_highlighted: Any | None = None
+
+    def compose(self) -> ComposeResult:
+        if self._welcome_info is not None:
+            self._welcome_card = WelcomeCard(
+                version=self._welcome_info.get("version", "0.2.0"),
+                workspace=self._welcome_info.get("workspace", "."),
+                branch=self._welcome_info.get("branch", ""),
+                profile=self._welcome_info.get("profile", "shared"),
+                subagents=self._welcome_info.get("subagents", "tier1_only"),
+                lang=self.lang,
+            )
+            yield self._welcome_card
 
     def on_mount(self) -> None:
         self.anchor(True)
+
+    def _hide_welcome(self) -> None:
+        if self._welcome_card is not None:
+            self._welcome_card.display = False
+
+    def update_welcome_meta(self, *, branch: str | None = None, lang: str | None = None) -> None:
+        if lang is not None:
+            self.lang = lang
+        if self._welcome_card is not None:
+            self._welcome_card.update_meta(branch=branch, lang=lang)
+        if lang is not None:
+            for child in self.children:
+                if isinstance(child, AssistantMessage):
+                    child.apply_lang(lang)
 
     @property
     def has_conversation_content(self) -> bool:
@@ -642,6 +777,7 @@ class SessionTranscript(VerticalScroll):
         self.close_active_user_message()
         self._close_activity_group()
         self._has_conversation_content = True
+        self._hide_welcome()
         await self.mount(Static(f"› {display_text}", classes="user-msg", markup=False))
         self._notify_persist("user", display_text)
         self._mark_new_content()
@@ -659,6 +795,7 @@ class SessionTranscript(VerticalScroll):
         ):
             self.close_active_user_message()
         self._has_conversation_content = True
+        self._hide_welcome()
         if self._active_user_widget is None:
             self._active_user_text = text
             self._active_user_id = message_id
@@ -694,6 +831,7 @@ class SessionTranscript(VerticalScroll):
         ):
             await self.close_active_message()
         self._has_conversation_content = True
+        self._hide_welcome()
         if self._active_msg is None:
             msg = AssistantMessage(lang=self.lang)
             self._active_msg = msg
@@ -707,6 +845,7 @@ class SessionTranscript(VerticalScroll):
         self.close_active_user_message()
         self._close_activity_group()
         self._has_conversation_content = True
+        self._hide_welcome()
         if self._active_thought is None:
             tb = ThoughtBlock(text, lang=self.lang)
             self._active_thought = tb
@@ -720,6 +859,7 @@ class SessionTranscript(VerticalScroll):
         self.close_active_thought()
         self.close_active_user_message()
         self._has_conversation_content = True
+        self._hide_welcome()
 
         is_failed = event.is_error or event.status in ("failed", "error")
         explore_kind = classify_exploration_kind(event)
@@ -756,3 +896,94 @@ class SessionTranscript(VerticalScroll):
         for child in self.children:
             if isinstance(child, (ActivityGroup, ThoughtBlock, ToolCard)):
                 child.set_verbosity(high)
+
+    def get_last_assistant_message(self) -> AssistantMessage | None:
+        for child in reversed(list(self.children)):
+            if isinstance(child, AssistantMessage) and child.raw_markdown.strip():
+                return child
+        return None
+
+    def get_last_code_block(self) -> str | None:
+        for child in reversed(list(self.children)):
+            if isinstance(child, AssistantMessage):
+                blocks = child.extract_code_blocks()
+                if blocks:
+                    return blocks[-1]
+        return None
+
+    def _widget_searchable_text(self, widget: Any) -> str:
+        if isinstance(widget, WelcomeCard):
+            return ""
+        if isinstance(widget, AssistantMessage):
+            return widget.raw_markdown
+        if isinstance(widget, ThoughtBlock):
+            return widget.raw_text
+        if isinstance(widget, ToolCard):
+            return f"{widget.title}\n{widget.event.name}\n{widget.event.raw_input}\n{widget.event.raw_output}"
+        if isinstance(widget, ActivityGroup):
+            return f"{widget.title}\n" + "\n".join(line for _, line in widget._entries.values())
+        if isinstance(widget, Static):
+            return str(widget.render())
+        return ""
+
+    def search_widgets(self, query: str) -> list[Any]:
+        """Return transcript child widgets matching case-insensitive `query`."""
+        q = query.strip().lower()
+        if not q:
+            return []
+        matches: list[Any] = []
+        for child in self.children:
+            if not child.display:
+                continue
+            if q in self._widget_searchable_text(child).lower():
+                matches.append(child)
+        return matches
+
+    def highlight_search_match(self, widget: Any | None) -> None:
+        """Highlight the active search match widget and scroll it into view."""
+        if self._search_highlighted is not None:
+            try:
+                self._search_highlighted.remove_class("search-match-active")
+            except Exception:
+                pass
+            self._search_highlighted = None
+        if widget is not None:
+            self._search_highlighted = widget
+            widget.add_class("search-match-active")
+            try:
+                self.detach_anchor()
+                widget.scroll_visible(animate=False)
+            except Exception:
+                pass
+
+    def export_markdown(self, header_meta: dict[str, Any] | None = None) -> str:
+        """Export user & assistant conversation messages to a clean Markdown document."""
+        meta = header_meta or {}
+        lines: list[str] = [
+            f"# Optigravity Session `{self.session_id}`",
+            "",
+        ]
+        if meta:
+            meta_parts = [f"- **{k}**: `{v}`" for k, v in meta.items() if v is not None and str(v) != ""]
+            if meta_parts:
+                lines.extend(meta_parts)
+                lines.append("")
+        lines.append("---")
+        lines.append("")
+
+        msg_count = 0
+        for child in self.children:
+            if isinstance(child, WelcomeCard):
+                continue
+            if isinstance(child, Static) and child.has_class("user-msg"):
+                txt = str(child.render()).removeprefix("› ").strip()
+                if txt:
+                    msg_count += 1
+                    lines.extend(["## User", "", txt, ""])
+            elif isinstance(child, AssistantMessage) and child.raw_markdown.strip():
+                msg_count += 1
+                lines.extend(["## Assistant", "", child.raw_markdown.strip(), ""])
+
+        if msg_count == 0:
+            return ""
+        return "\n".join(lines).rstrip() + "\n"

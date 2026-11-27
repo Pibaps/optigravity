@@ -1,6 +1,6 @@
 # serializer version: 1
 # name: test_syrupy_firebreak_refusal_and_handoff[firebreak_large_file]
-  "[ogy] Large source file 'big_module.py' (34.5 KB, 2500 lines > 24 KB limit). Read a bounded slice using StartLine/EndLine (e.g. StartLine=1, EndLine=120)."
+  "[ogy] Large source file 'big_module.py' (32.0 KB, 2500 lines > 24 KB limit). Read a bounded slice using StartLine/EndLine (e.g. StartLine=1, EndLine=120)."
 # ---
 # name: test_syrupy_firebreak_refusal_and_handoff[handoff_md]
   '''
@@ -18,7 +18,7 @@
 # name: test_syrupy_stats_and_waste_reports[ogy_stats]
   '''
   ══ Optigravity ROI Summary ══
-    Cache tokens avoided (shown): 45.0K  |  Hook/wrap saved (7d): 0
+    Cache tokens avoided (shown): 45.0K (est. saved $0.0405)  |  Hook/wrap saved (7d): 0
     Trend 7d : 1 sessions · cache 90.0% · est $0.0800
     Trend 30d: 1 sessions · cache 90.0% · est $0.0800
   
@@ -62,9 +62,9 @@
   agy_cfg_dir : <TMP>/_ogy_test_home/.local/share/optigravity/gemini-profile/.gemini/config (exists=True)
   language    : en | overwrite_ok=True
   backups     : OK (1 snapshot(s), latest=20261115-150000)
-  oauth_links : OK (oauth_creds.json: hardlink OK)
+  oauth_links : OK (oauth_creds.json: <LINK> OK)
   shared_clean: WARN (ogy-managed residues in <TMP>/_ogy_test_home/.gemini: antigravity-cli/settings.json (statusLine), config/hooks.json (ogy-telemetry-and-budget, ogy-firebreaks), config/mcp_config.json (optigravity, ogy-subagents), config/rules/ogy-hygiene.md, config/skills/ogy-budget/SKILL.md)
-  agy_binary  : C:/Users/pbapi/AppData/Local/agy/bin/agy.EXE
+  agy_binary  : <AGY_BIN>
   json:settings.json  : OK (valid JSON)
   json:hooks.json     : OK (valid JSON)
   json:mcp_config.json: OK (valid JSON)
@@ -73,6 +73,7 @@
   sqlite_wal  : journal_mode=wal, user_version=2/2, quick_check=ok
   hook_latency: <MS> ms (OK, target < 25 ms)
   gemini_api  : SKIP (not configured for privacy_mode=tier1_only)
+  summary     : 1 anomaly(ies) detected
   
   '''
 # ---
@@ -86,7 +87,7 @@
   agy_cfg_dir : <TMP>/_ogy_test_home/.gemini/config (exists=True)
   language    : en | overwrite_ok=True
   backups     : OK (1 snapshot(s), latest=20261115-150000)
-  agy_binary  : C:/Users/pbapi/AppData/Local/agy/bin/agy.EXE
+  agy_binary  : <AGY_BIN>
   json:settings.json  : OK (valid JSON)
   json:hooks.json     : OK (valid JSON)
   json:mcp_config.json: OK (valid JSON)
@@ -95,6 +96,7 @@
   sqlite_wal  : journal_mode=wal, user_version=2/2, quick_check=ok
   hook_latency: <MS> ms (OK, target < 25 ms)
   gemini_api  : SKIP (not configured for privacy_mode=tier1_only)
+  summary     : OK (0 anomalies)
   
   '''
 # ---

@@ -239,13 +239,27 @@ def render_stats_report(conn: sqlite3.Connection, sessions_data: list[dict[str, 
     sub = roi["subagents"]
 
     total_cache_avoided = sum(int(r.get("total_cache_read_tokens") or 0) for r in sessions_data)
+    # Conservative 90% cache-read discount estimate using per-model pricing
+    est_cache_savings_usd = 0.0
+    try:
+        from ogy_core.pricing import get_model_pricing
+
+        for r in sessions_data:
+            cr = int(r.get("total_cache_read_tokens") or 0)
+            if cr > 0:
+                p = get_model_pricing(str(r.get("initial_model") or "gemini-4-hydrogen"))
+                est_cache_savings_usd += (cr / 1_000_000.0) * max(0.0, p.input_per_m - p.cache_read_per_m)
+    except Exception:
+        est_cache_savings_usd = (total_cache_avoided / 1_000_000.0) * 0.90
+
     hit7 = (d7["cache_read"] / d7["total_in"] * 100.0) if d7["total_in"] > 0 else 0.0
     hit30 = (d30["cache_read"] / d30["total_in"] * 100.0) if d30["total_in"] > 0 else 0.0
 
     lines: list[str] = []
     lines.append(_c("══ Optigravity ROI Summary ══", "1;36"))
     lines.append(
-        f"  Cache tokens avoided (shown): {_c(_fmt_tokens(total_cache_avoided), '1;32')}  |  "
+        f"  Cache tokens avoided (shown): {_c(_fmt_tokens(total_cache_avoided), '1;32')} "
+        f"(est. saved {_c(f'${est_cache_savings_usd:.4f}', '1;32')})  |  "
         f"Hook/wrap saved (7d): {_fmt_tokens(d7['hook_tokens_saved'])}"
     )
     lines.append(

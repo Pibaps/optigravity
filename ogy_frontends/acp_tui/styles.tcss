@@ -596,3 +596,276 @@ PermissionModal, ElicitationModal, HandoffReviewModal, SessionPickerModal, HelpG
 #diff-fullscreen-scroll {
     height: 1fr;
 }
+
+/* V3.6 WelcomeCard, Copy Code, Search, Queue, Responsive & Themes */
+WelcomeCard {
+    height: auto;
+    border: round #263245;
+    background: #121722;
+    padding: 1 2;
+    margin: 1 0;
+}
+
+WelcomeCard .welcome-title {
+    color: #6ea8fe;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+WelcomeCard .welcome-meta {
+    color: #c9d1d9;
+}
+
+WelcomeCard .welcome-tips {
+    color: #8b949e;
+    margin-top: 1;
+}
+
+AssistantMessage .copy-code-btn {
+    height: 1;
+    min-width: 12;
+    border: none;
+    background: #1a2433;
+    color: #6ea8fe;
+    padding: 0 1;
+    margin-right: 1;
+}
+
+AssistantMessage .copy-code-btn:hover {
+    background: #26354d;
+    color: #e6edf3;
+}
+
+.search-match-active {
+    border-left: thick #f0c674;
+    background: #221d12;
+}
+
+#transcript-search-bar {
+    display: none;
+    height: 3;
+    padding: 0 2;
+    background: #131823;
+    border-top: solid #262e3d;
+    align: left middle;
+}
+
+#transcript-search-bar.visible {
+    display: block;
+}
+
+#transcript-search-input {
+    width: 1fr;
+    height: 3;
+    background: #151922;
+    border: solid #6ea8fe;
+    color: #e6edf3;
+}
+
+#transcript-search-count {
+    width: auto;
+    min-width: 10;
+    padding: 1 1 0 2;
+    color: #8b949e;
+}
+
+#queue-bar {
+    display: none;
+    height: 1;
+    padding: 0 2;
+    background: #182232;
+    color: #79c0ff;
+    align: left middle;
+}
+
+#queue-bar.visible {
+    display: block;
+}
+
+#queue-text {
+    width: 1fr;
+    color: #79c0ff;
+}
+
+#queue-clear-btn {
+    height: 1;
+    min-width: 8;
+    border: none;
+    background: #26344a;
+    color: #e6edf3;
+    padding: 0 1;
+}
+
+TelemetryPanel.compact {
+    width: 30;
+    padding: 1 1;
+}
+
+/* Theme: Optigravity Daylight (Light) */
+Screen.theme-light {
+    background: #f6f8fa;
+    color: #1f2328;
+}
+
+.theme-light Header,
+.theme-light Footer {
+    background: #eaeef2;
+    color: #24292f;
+}
+
+.theme-light #session-bar {
+    background: #eaeef2;
+    color: #1f2328;
+}
+
+.theme-light SessionTranscript {
+    background: #f6f8fa;
+    scrollbar-background: #f6f8fa;
+    scrollbar-color: #c8d1da;
+}
+
+.theme-light TelemetryPanel {
+    background: #ffffff;
+    border-left: solid #d0d7de;
+    scrollbar-background: #ffffff;
+}
+
+.theme-light WelcomeCard {
+    background: #ffffff;
+    border: round #d0d7de;
+}
+
+.theme-light WelcomeCard .welcome-title {
+    color: #0969da;
+}
+
+.theme-light WelcomeCard .welcome-meta {
+    color: #1f2328;
+}
+
+.theme-light WelcomeCard .welcome-tips {
+    color: #57606a;
+}
+
+.theme-light .user-msg {
+    background: #ddf4ff;
+    color: #1f2328;
+    border-left: thick #0969da;
+}
+
+.theme-light .notice-line {
+    background: #eaeef2;
+    color: #24292f;
+    border-left: outer #0969da;
+}
+
+.theme-light ToolCard {
+    background: #ffffff;
+    border-left: outer #afb8c1;
+}
+
+.theme-light ToolCard CollapsibleTitle {
+    color: #1f2328;
+}
+
+.theme-light PromptComposer {
+    background: #f6f8fa;
+    border-top: solid #d0d7de;
+}
+
+.theme-light #prompt-input,
+.theme-light #composer-popup,
+.theme-light #transcript-search-input {
+    background: #ffffff;
+    color: #1f2328;
+    border: solid #afb8c1;
+}
+
+.theme-light #prompt-input:focus {
+    border: solid #0969da;
+}
+
+.theme-light #send-btn {
+    background: #0969da;
+    color: #ffffff;
+    border: solid #0550ae;
+}
+
+.theme-light #queue-bar {
+    background: #ddf4ff;
+    color: #0550ae;
+}
+
+.theme-light #queue-text {
+    color: #0550ae;
+}
+
+.theme-light .panel-section {
+    color: #57606a;
+    border-bottom: solid #d8dee4;
+}
+
+.theme-light MetricGauge .gauge-label,
+.theme-light MetricRow .metric-key {
+    color: #57606a;
+}
+
+.theme-light MetricGauge .gauge-value,
+.theme-light MetricRow .metric-val {
+    color: #1f2328;
+}
+
+/* Theme: Optigravity High-Contrast */
+Screen.theme-high-contrast {
+    background: #000000;
+    color: #ffffff;
+}
+
+.theme-high-contrast Header,
+.theme-high-contrast Footer,
+.theme-high-contrast #session-bar {
+    background: #000000;
+    color: #ffffff;
+}
+
+.theme-high-contrast SessionTranscript,
+.theme-high-contrast TelemetryPanel,
+.theme-high-contrast PromptComposer {
+    background: #000000;
+    color: #ffffff;
+}
+
+.theme-high-contrast TelemetryPanel {
+    border-left: solid #ffffff;
+}
+
+.theme-high-contrast WelcomeCard {
+    background: #000000;
+    border: heavy #00ffff;
+}
+
+.theme-high-contrast WelcomeCard .welcome-title {
+    color: #00ffff;
+}
+
+.theme-high-contrast .user-msg {
+    background: #001b33;
+    color: #ffffff;
+    border-left: thick #00ffff;
+}
+
+.theme-high-contrast #prompt-input {
+    background: #000000;
+    color: #ffffff;
+    border: heavy #ffffff;
+}
+
+.theme-high-contrast #prompt-input:focus {
+    border: heavy #ffff00;
+}
+
+.theme-high-contrast #send-btn {
+    background: #000000;
+    color: #ffff00;
+    border: heavy #ffff00;
+}

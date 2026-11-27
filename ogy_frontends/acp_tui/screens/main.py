@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from rich.markup import escape as rich_escape
-from textual import events, work
+from rich.text import Text
+from textual import events, on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, ContentSwitcher, Footer, Header, Static
+from textual.widgets import Button, ContentSwitcher, Footer, Header, Input, Static
 
+from ogy_core import get_version
 from ogy_core.context_health import write_handoff
 from ogy_core.router import route_stage1
 from ogy_core.storage import connect, write_tx
@@ -53,7 +55,7 @@ from ogy_frontends.acp_tui.state.sessions import (
     load_sessions_meta_readonly,
 )
 from ogy_frontends.acp_tui.widgets.composer import PromptComposer, PromptTextArea
-from ogy_frontends.acp_tui.widgets.telemetry import TelemetryPanel, _safe_widget_id
+from ogy_frontends.acp_tui.widgets.telemetry import TelemetryPanel, _format_tokens, _safe_widget_id
 from ogy_frontends.acp_tui.widgets.transcript import AssistantMessage, SessionTranscript, ToolCard
 
 DEFAULT_MODELS = ["gemini-4-hydrogen", "gemini-4-neon", "gemini-4-carbon"]
@@ -61,6 +63,7 @@ DEFAULT_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 DEFAULT_MODES = ["default", "accept-edits", "auto", "plan"]
 DEFAULT_FRUGAL_MODEL = "gemini-4-hydrogen"
 DEFAULT_FRUGAL_EFFORT = "medium"
+SUPPORTED_THEMES = ("dark", "light", "high-contrast")
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
@@ -78,7 +81,13 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/mode", "/mode <mode>", "cmd_mode", True),
     SlashCommandSpec("/btw", "/btw <question>", "cmd_btw", True),
     SlashCommandSpec("/delegate", "/delegate [question]", "cmd_delegate", True),
+    SlashCommandSpec("/theme", "/theme <name>", "cmd_theme", True),
     SlashCommandSpec("/lang", "/lang <fr|en>", "cmd_lang", True),
+    SlashCommandSpec("/copy", "/copy [code]", "cmd_copy", True),
+    SlashCommandSpec("/export", "/export [path]", "cmd_export", True),
+    SlashCommandSpec("/status", "/status", "cmd_status"),
+    SlashCommandSpec("/find", "/find", "cmd_find"),
+    SlashCommandSpec("/clear-queue", "/clear-queue", "cmd_clear_queue"),
     SlashCommandSpec("/rotate", "/rotate", "cmd_rotate"),
     SlashCommandSpec("/handoff", "/handoff", "cmd_handoff"),
     SlashCommandSpec("/new", "/new", "cmd_new"),
@@ -108,6 +117,25 @@ def _detect_has_test_runner(cwd: str) -> bool:
         (root / marker).exists()
         for marker in ("pyproject.toml", "pytest.ini", "tests", "package.json", "Cargo.toml", "go.mod")
     )
+
+
+def _detect_git_branch(cwd: str) -> str:
+    """Return current git branch name (run in worker thread; returns '' outside git repos)."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        if proc.returncode == 0:
+            branch = proc.stdout.strip()
+            return branch if branch and branch != "HEAD" else ""
+    except Exception:
+        pass
+    return ""
 
 
 def _build_handoff_draft(state: SessionTelemetryState, cwd: str) -> str:
@@ -162,6 +190,15 @@ class MainWorkspaceControllerMixin:
                 yield ContentSwitcher(id="session-switcher")
                 yield Button(t(self.lang, "new_messages_pill"), id="new-messages-pill")
             yield TelemetryPanel(lang=self.lang, id="telemetry-panel")
+        with Horizontal(id="transcript-search-bar"):
+            yield Input(
+                placeholder=t(self.lang, "transcript_search_placeholder"),
+                id="transcript-search-input",
+            )
+            yield Static("", id="transcript-search-count", markup=False)
+        with Horizontal(id="queue-bar"):
+            yield Static("", id="queue-text", markup=False)
+            yield Button(t(self.lang, "queue_clear_btn"), id="queue-clear-btn")
         yield Static("", id="activity-bar", markup=False)
         yield PromptComposer(
             cwd=self.client_config.cwd,
@@ -179,12 +216,63 @@ class MainWorkspaceControllerMixin:
         yield Footer()
 
     async def on_mount(self) -> None:
+        self._apply_theme(self.tui_theme, notify=False)
+        self._apply_responsive_layout(self.size.width)
         self.set_interval(5.0, self._schedule_telemetry_poll)
         self.set_interval(0.12, self._tick_spinner)
         self._schedule_telemetry_poll()
+        self._detect_git_branch_worker()
         self.query_one("#prompt-input", PromptTextArea).focus()
         if self.auto_connect:
             self._boot_acp()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_responsive_layout(event.size.width)
+
+    def _apply_responsive_layout(self, width: int) -> None:
+        try:
+            panel = self.query_one("#telemetry-panel", TelemetryPanel)
+        except Exception:
+            return
+        if self._sidebar_user_override is not None:
+            panel.set_class(not self._sidebar_user_override, "hidden")
+        else:
+            panel.set_class(width < 100, "hidden")
+        panel.set_class(100 <= width < 120, "compact")
+        if self.current_state is not None:
+            self._refresh_ui()
+
+    def _apply_theme(self, theme_name: str, *, notify: bool = True) -> None:
+        norm = theme_name.strip().lower()
+        if norm not in SUPPORTED_THEMES:
+            return
+        self.tui_theme = norm
+        for target in (self, self.screen):
+            try:
+                target.set_class(norm == "light", "theme-light")
+                target.set_class(norm == "high-contrast", "theme-high-contrast")
+            except Exception:
+                pass
+        if notify:
+            self._toast(t(self.lang, "theme_changed", val=norm))
+
+    def _toast(self, message: str, *, severity: str = "information", timeout: float = 3.0) -> None:
+        try:
+            self.notify(message, severity=severity, timeout=timeout)
+        except Exception:
+            pass
+
+    @work(thread=True, exclusive=True, group="git-branch-detect")
+    def _detect_git_branch_worker(self) -> None:
+        branch = _detect_git_branch(self.client_config.cwd)
+        self.call_from_thread(self._apply_git_branch, branch)
+
+    def _apply_git_branch(self, branch: str) -> None:
+        self._git_branch = branch
+        for tr in self._transcripts.values():
+            tr.update_welcome_meta(branch=branch)
+        if self.current_state is not None:
+            self._refresh_ui()
 
     async def on_unmount(self) -> None:
         self._working = False
@@ -264,7 +352,29 @@ class MainWorkspaceControllerMixin:
     def _transcript_widget_id(self, session_id: str) -> str:
         return f"transcript-{_safe_widget_id(session_id)}"
 
+    def _build_welcome_info(self) -> dict[str, str]:
+        ws_name = Path(self.client_config.cwd).name or self.client_config.cwd
+        return {
+            "version": f"v{get_version()}",
+            "workspace": ws_name,
+            "branch": self._git_branch,
+            "profile": self.ogy_config.profile_mode,
+            "subagents": self.ogy_config.subagents_privacy_mode,
+        }
+
+    def _switch_session_draft(self, old_sid: str | None, new_sid: str | None) -> None:
+        if not old_sid or not new_sid or old_sid == new_sid:
+            return
+        try:
+            ta = self.query_one("#prompt-input", PromptTextArea)
+        except Exception:
+            return
+        self.registry.save_draft(old_sid, ta.text)
+        restored = self.registry.get_draft(new_sid)
+        ta.value = restored
+
     async def _ensure_transcript(self, session_id: str, *, activate: bool = False) -> SessionTranscript:
+        prev_sid = self.registry.active_session_id
         existing = self._transcripts.get(session_id)
         switcher = self.query_one("#session-switcher", ContentSwitcher)
         if existing is None:
@@ -274,13 +384,16 @@ class MainWorkspaceControllerMixin:
                 lang=self.lang,
                 verbosity=self.verbosity,
                 on_persist=self._schedule_transcript_persist,
+                welcome_info=self._build_welcome_info(),
                 id=wid,
             )
             self._transcripts[session_id] = existing
             await switcher.mount(existing)
         if activate:
+            self._switch_session_draft(prev_sid, session_id)
             switcher.current = existing.id
             self._update_new_messages_pill(existing.is_anchored, False)
+            self._refresh_queue_bar()
         return existing
 
     def get_active_transcript(self) -> SessionTranscript | None:
@@ -308,13 +421,22 @@ class MainWorkspaceControllerMixin:
                 tr.pin_to_bottom()
         elif btn_id == "proposal-apply-btn":
             await self.action_accept_proposal()
+        elif btn_id == "queue-clear-btn":
+            await self._clear_active_queue()
 
     async def on_assistant_message_copy_requested(self, event: AssistantMessage.CopyRequested) -> None:
         try:
             self.copy_to_clipboard(event.raw_text)
         except Exception:
             pass
-        await self._append_notice(t(self.lang, "copied_notice", chars=len(event.raw_text)))
+        self._toast(t(self.lang, "copied_notice", chars=len(event.raw_text)))
+
+    async def on_assistant_message_copy_code_requested(self, event: AssistantMessage.CopyCodeRequested) -> None:
+        try:
+            self.copy_to_clipboard(event.raw_code)
+        except Exception:
+            pass
+        self._toast(t(self.lang, "copied_code_notice", chars=len(event.raw_code)))
 
     def on_tool_card_fullscreen_diff_requested(self, event: ToolCard.FullscreenDiffRequested) -> None:
         self.push_screen(DiffPreviewModal(event.title, event.diff_text, lang=self.lang))
@@ -357,9 +479,11 @@ class MainWorkspaceControllerMixin:
         self.query_one("#prompt-composer", PromptComposer).apply_lang(self.lang)
         self.query_one("#proposal-apply-btn", Button).label = t(self.lang, "apply")
         self.query_one("#new-messages-pill", Button).label = t(self.lang, "new_messages_pill")
+        self.query_one("#queue-clear-btn", Button).label = t(self.lang, "queue_clear_btn")
+        self.query_one("#transcript-search-input", Input).placeholder = t(self.lang, "transcript_search_placeholder")
         self.query_one("#telemetry-panel", TelemetryPanel).apply_lang(self.lang)
         for tr in self._transcripts.values():
-            tr.lang = self.lang
+            tr.update_welcome_meta(lang=self.lang)
         self._refresh_ui()
 
     # ------------------------------------------------------------------
@@ -385,7 +509,10 @@ class MainWorkspaceControllerMixin:
     def _ensure_state(self, session_id: str, *, activate: bool = False) -> SessionTelemetryState:
         cfg = self.client.session_configs.get(session_id, {})
         if activate:
-            return self.registry.set_active(session_id, config_options=cfg)
+            prev_sid = self.registry.active_session_id
+            state = self.registry.set_active(session_id, config_options=cfg)
+            self._switch_session_draft(prev_sid, session_id)
+            return state
         return self.registry.ensure(session_id, config_options=cfg)
 
     @property
@@ -502,6 +629,18 @@ class MainWorkspaceControllerMixin:
             return [(f"/effort {e}", f"/effort {e}") for e in self.get_available_efforts() if e.lower().startswith(arg_prefix)]
         if cmd == "/mode":
             return [(f"/mode {md}", f"/mode {md}") for md in self.get_available_modes() if md.lower().startswith(arg_prefix)]
+        if cmd == "/theme":
+            return [
+                (f"/theme {th}", f"/theme {th}")
+                for th in SUPPORTED_THEMES
+                if th.startswith(arg_prefix)
+            ]
+        if cmd == "/copy":
+            return [
+                (f"/copy {opt}", f"/copy {opt}")
+                for opt in ("code", "last")
+                if opt.startswith(arg_prefix)
+            ]
         if cmd == "/lang":
             return [
                 (f"/lang {code}", f"/lang {code}  ({lbl})")
@@ -629,6 +768,64 @@ class MainWorkspaceControllerMixin:
         tr = await self._ensure_transcript(sid, activate=(sid == self.registry.active_session_id or not self._transcripts))
         await tr.append_notice(message, level=level)
 
+    def _refresh_queue_bar(self) -> None:
+        try:
+            qbar = self.query_one("#queue-bar", Horizontal)
+            qtext = self.query_one("#queue-text", Static)
+        except Exception:
+            return
+        sid = self.registry.active_session_id or self.client.active_session_id
+        count = self.registry.queue_len(sid)
+        if count > 0 and sid:
+            nxt = self.registry.peek_prompt(sid)
+            preview = (nxt.display_text if nxt else "").replace("\n", " ")[:64]
+            qtext.update(t(self.lang, "queue_status", n=count, preview=preview))
+            qbar.add_class("visible")
+        else:
+            qtext.update("")
+            qbar.remove_class("visible")
+
+    async def _clear_active_queue(self) -> None:
+        sid = self.registry.active_session_id or self.client.active_session_id
+        removed = self.registry.clear_queue(sid)
+        self._refresh_queue_bar()
+        if removed:
+            self._toast(t(self.lang, "queue_cleared", n=removed))
+
+    def _build_session_bar_renderable(self, state: SessionTelemetryState, *, sidebar_hidden: bool) -> Text:
+        health = state.assess_health()
+        zone_dot, zone_style = {
+            "green": ("●", "bold #3fb950"),
+            "amber": ("▲", "bold #d29922"),
+            "red": ("■", "bold #f85149"),
+        }.get(health.zone, ("●", "bold #3fb950"))
+
+        out = Text()
+        out.append(f"{zone_dot} ", style=zone_style)
+        base_str = t(
+            self.lang,
+            "session_bar",
+            sid=state.session_id[:12],
+            count=len(self.registry.sessions),
+            model=state.model_id,
+            effort=state.effort,
+            mode=state.mode,
+        )
+        out.append(base_str)
+
+        if self._git_branch:
+            out.append(f"  ·  ⎇ {self._git_branch}", style="#6ea8fe")
+        if self.ogy_config.profile_mode == "isolated":
+            out.append("  ·  [isolated]", style="bold #3fb950")
+        if sidebar_hidden:
+            ctx_pct = int(min(100.0, (state.context_tokens / max(1, state.context_max)) * 100.0))
+            cache_str = f"{health.cache_hit_pct:.0f}%" if health.cache_hit_pct is not None else "--"
+            out.append(
+                f"  ·  Ctx {ctx_pct}% · Cache {cache_str} · ${state.total_cost_usd:.3f}",
+                style="#8b949e",
+            )
+        return out
+
     def _refresh_ui(self) -> None:
         state = self.current_state
         bar = self.query_one("#session-bar", Static)
@@ -637,23 +834,16 @@ class MainWorkspaceControllerMixin:
         if state is None:
             bar.update(t(self.lang, "session_none"))
             prop_bar.remove_class("visible")
+            self._refresh_queue_bar()
             return
 
-        bar.update(
-            t(
-                self.lang,
-                "session_bar",
-                sid=state.session_id[:12],
-                count=len(self.registry.sessions),
-                model=state.model_id,
-                effort=state.effort,
-                mode=state.mode,
-            )
-        )
+        tel_panel = self.query_one("#telemetry-panel", TelemetryPanel)
+        sidebar_hidden = tel_panel.has_class("hidden")
+        bar.update(self._build_session_bar_renderable(state, sidebar_hidden=sidebar_hidden))
+
         snap = self.registry.latest_snapshot
-        self.query_one("#telemetry-panel", TelemetryPanel).refresh_state(
-            state, snap.quotas, snap.subagent_runs, snap.subagent_summary
-        )
+        tel_panel.refresh_state(state, snap.quotas, snap.subagent_runs, snap.subagent_summary)
+        self._refresh_queue_bar()
 
         proposals = self.orchestrator.evaluate_proposals(state)
         if self._pending_v1_proposal is not None:
@@ -667,7 +857,7 @@ class MainWorkspaceControllerMixin:
             prop_bar.remove_class("visible")
 
     # ------------------------------------------------------------------
-    # Composer submission & Slash Commands
+    # Composer submission, Prompt Queueing & Slash Commands
     # ------------------------------------------------------------------
 
     async def on_prompt_composer_prompt_submitted(self, event: PromptComposer.PromptSubmitted) -> None:
@@ -678,7 +868,20 @@ class MainWorkspaceControllerMixin:
             await self._handle_slash_command(text)
             return
         composer = self.query_one("#prompt-composer", PromptComposer)
-        composer.persist_prompt(event.display_text, session_id=self.client.active_session_id)
+        sid = self.client.active_session_id or self.registry.active_session_id
+        composer.persist_prompt(event.display_text, session_id=sid)
+
+        if self._working and sid:
+            q_len = self.registry.enqueue_prompt(
+                sid,
+                text,
+                display_text=event.display_text,
+                extra_blocks=event.extra_blocks or None,
+            )
+            self._refresh_queue_bar()
+            self._toast(t(self.lang, "queue_added", n=q_len))
+            return
+
         task = asyncio.create_task(
             self._dispatch_prompt(text, display_text=event.display_text, extra_blocks=event.extra_blocks or None)
         )
@@ -694,6 +897,7 @@ class MainWorkspaceControllerMixin:
         session_id: str | None = None,
     ) -> None:
         sid = session_id or self.client.active_session_id or self.registry.active_session_id
+        self._turn_cancelled_flag = False
         if sid:
             tr = await self._ensure_transcript(sid, activate=True)
             await tr.append_user_message(display_text or text)
@@ -710,6 +914,20 @@ class MainWorkspaceControllerMixin:
             await self._append_notice(t(self.lang, "prompt_error", err=exc), level="err", session_id=sid)
         finally:
             self._set_working(False)
+            if sid and not self._turn_cancelled_flag:
+                nxt = self.registry.pop_prompt(sid)
+                self._refresh_queue_bar()
+                if nxt is not None:
+                    q_task = asyncio.create_task(
+                        self._dispatch_prompt(
+                            nxt.text,
+                            display_text=nxt.display_text,
+                            extra_blocks=list(nxt.extra_blocks) or None,
+                            session_id=sid,
+                        )
+                    )
+                    self._inflight_tasks.add(q_task)
+                    q_task.add_done_callback(self._inflight_tasks.discard)
 
     def _run_palette_cmd(self, cmd_line: str) -> None:
         task = asyncio.create_task(self._handle_slash_command(cmd_line))
@@ -728,6 +946,73 @@ class MainWorkspaceControllerMixin:
             return
         if cmd == "/glossary":
             self.action_show_glossary()
+            return
+        if cmd == "/find":
+            self.action_open_transcript_search()
+            return
+        if cmd == "/clear-queue":
+            await self._clear_active_queue()
+            return
+        if cmd == "/theme":
+            if not arg or arg.lower() not in SUPPORTED_THEMES:
+                await self._append_notice(t(self.lang, "theme_status", cur=self.tui_theme))
+                return
+            self._apply_theme(arg.lower(), notify=True)
+            return
+        if cmd == "/copy":
+            tr = self.get_active_transcript()
+            if tr is None:
+                self._toast(t(self.lang, "copy_empty"), severity="warning")
+                return
+            if arg.lower() == "code":
+                code = tr.get_last_code_block()
+                if not code:
+                    self._toast(t(self.lang, "copy_empty"), severity="warning")
+                    return
+                try:
+                    self.copy_to_clipboard(code)
+                except Exception:
+                    pass
+                self._toast(t(self.lang, "copied_code_notice", chars=len(code)))
+                return
+            last_msg = tr.get_last_assistant_message()
+            if last_msg is None:
+                self._toast(t(self.lang, "copy_empty"), severity="warning")
+                return
+            try:
+                self.copy_to_clipboard(last_msg.raw_markdown)
+            except Exception:
+                pass
+            self._toast(t(self.lang, "copied_notice", chars=len(last_msg.raw_markdown)))
+            return
+        if cmd == "/export":
+            await self._export_active_session(arg)
+            return
+        if cmd == "/status":
+            if state is None:
+                await self._append_notice(t(self.lang, "session_none"))
+                return
+            health = state.assess_health()
+            ctx_pct = int(min(100.0, (state.context_tokens / max(1, state.context_max)) * 100.0))
+            cache_str = f"{health.cache_hit_pct:.1f}%" if health.cache_hit_pct is not None else "--"
+            sub = self.registry.latest_snapshot.subagent_summary or {}
+            await self._append_notice(
+                t(
+                    self.lang,
+                    "status_summary",
+                    sid=state.session_id[:12],
+                    profile=self.ogy_config.profile_mode,
+                    model=state.model_id,
+                    effort=state.effort,
+                    mode=state.mode,
+                    ctx=f"{_format_tokens(state.context_tokens)}/{_format_tokens(state.context_max)}",
+                    pct=ctx_pct,
+                    cache=cache_str,
+                    cost=state.total_cost_usd,
+                    api=float(sub.get("cost_usd") or 0.0),
+                    runs=int(sub.get("runs") or 0),
+                )
+            )
             return
         if cmd == "/lang":
             if not arg or arg.lower() not in SUPPORTED_LANGS:
@@ -824,22 +1109,149 @@ class MainWorkspaceControllerMixin:
             return
         await self._append_notice(t(self.lang, "cmd_unknown", cmd=rich_escape(cmd_line)), level="warn")
 
+    async def _export_active_session(self, custom_path: str = "") -> None:
+        tr = self.get_active_transcript()
+        state = self.current_state
+        if tr is None:
+            self._toast(t(self.lang, "export_empty"), severity="warning")
+            return
+        meta: dict[str, Any] = {}
+        if state is not None:
+            health = state.assess_health()
+            meta = {
+                "Model": state.model_id,
+                "Effort": state.effort,
+                "Mode": state.mode,
+                "Turns": state.turn_count,
+                "Cache Hit": f"{health.cache_hit_pct:.1f}%" if health.cache_hit_pct is not None else "--",
+                "Est. Cost": f"${state.total_cost_usd:.4f}",
+                "Profile": self.ogy_config.profile_mode,
+            }
+        md = tr.export_markdown(meta)
+        if not md:
+            self._toast(t(self.lang, "export_empty"), severity="warning")
+            return
+        if custom_path:
+            out_path = Path(custom_path).expanduser()
+            if not out_path.is_absolute():
+                out_path = Path(self.client_config.cwd) / out_path
+        else:
+            safe_sid = _safe_widget_id(tr.session_id)[:32] or "session"
+            out_path = Path(self.client_config.cwd) / ".ogy" / "exports" / f"{safe_sid}.md"
+        try:
+            await asyncio.to_thread(self._write_export_file, out_path, md)
+            self._toast(t(self.lang, "export_saved", path=str(out_path)))
+        except Exception as exc:
+            self._toast(t(self.lang, "export_failed", err=exc), severity="error")
+
+    @staticmethod
+    def _write_export_file(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
     # ------------------------------------------------------------------
-    # Actions & Contextual Proposal Hotkeys ([R], [U], [D], [V])
+    # In-Transcript Search (`Ctrl+F` / `/find`)
+    # ------------------------------------------------------------------
+
+    def action_open_transcript_search(self) -> None:
+        bar = self.query_one("#transcript-search-bar", Horizontal)
+        inp = self.query_one("#transcript-search-input", Input)
+        bar.add_class("visible")
+        inp.focus()
+        if inp.value.strip():
+            self._run_transcript_search(inp.value)
+
+    def _close_transcript_search(self) -> None:
+        bar = self.query_one("#transcript-search-bar", Horizontal)
+        bar.remove_class("visible")
+        self._search_matches = []
+        self._search_idx = 0
+        self.query_one("#transcript-search-count", Static).update("")
+        tr = self.get_active_transcript()
+        if tr is not None:
+            tr.highlight_search_match(None)
+        self.query_one("#prompt-input", PromptTextArea).focus()
+
+    def _run_transcript_search(self, query: str) -> None:
+        tr = self.get_active_transcript()
+        count_lbl = self.query_one("#transcript-search-count", Static)
+        if tr is None or not query.strip():
+            self._search_matches = []
+            self._search_idx = 0
+            count_lbl.update("")
+            if tr is not None:
+                tr.highlight_search_match(None)
+            return
+        self._search_matches = tr.search_widgets(query)
+        self._search_idx = 0
+        if not self._search_matches:
+            count_lbl.update(t(self.lang, "transcript_search_none"))
+            tr.highlight_search_match(None)
+            return
+        count_lbl.update(t(self.lang, "transcript_search_count", cur=1, total=len(self._search_matches)))
+        tr.highlight_search_match(self._search_matches[0])
+
+    def _step_transcript_search(self, delta: int) -> None:
+        if not self._search_matches:
+            return
+        tr = self.get_active_transcript()
+        if tr is None:
+            return
+        self._search_idx = (self._search_idx + delta) % len(self._search_matches)
+        self.query_one("#transcript-search-count", Static).update(
+            t(self.lang, "transcript_search_count", cur=self._search_idx + 1, total=len(self._search_matches))
+        )
+        tr.highlight_search_match(self._search_matches[self._search_idx])
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "transcript-search-input":
+            self._run_transcript_search(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "transcript-search-input":
+            self._step_transcript_search(1)
+
+    # ------------------------------------------------------------------
+    # Actions & Contextual Proposal Hotkeys (Alt+R/U/D/V or unfocused r/u/d/v)
     # ------------------------------------------------------------------
 
     def on_key(self, event: events.Key) -> None:
         if isinstance(self.screen, ModalScreen):
             return
-        # Contextual 1-key proposals when prompt input is NOT focused (or empty with banner visible)
+
+        # Handle navigation inside transcript search bar
+        try:
+            sbar = self.query_one("#transcript-search-bar", Horizontal)
+            sinp = self.query_one("#transcript-search-input", Input)
+            if sbar.has_class("visible") and sinp.has_focus:
+                if event.key == "escape":
+                    self._close_transcript_search()
+                    event.prevent_default()
+                    event.stop()
+                    return
+                if event.key in ("up", "shift+enter"):
+                    self._step_transcript_search(-1)
+                    event.prevent_default()
+                    event.stop()
+                    return
+                if event.key == "down":
+                    self._step_transcript_search(1)
+                    event.prevent_default()
+                    event.stop()
+                    return
+        except Exception:
+            pass
+
+        # Contextual proposals: Alt+<key> works anywhere; bare <key> ONLY when composer is NOT focused
         if not self.active_proposals:
             return
         ta = self.query_one("#prompt-input", PromptTextArea)
-        if ta.has_focus and ta.text.strip():
-            return
         key = event.key.lower()
         for prop in self.active_proposals:
-            if prop.hotkey.lower() == key:
+            hk = prop.hotkey.lower()
+            is_alt = key == f"alt+{hk}"
+            is_bare_unfocused = (key == hk) and (not ta.has_focus)
+            if is_alt or is_bare_unfocused:
                 event.prevent_default()
                 event.stop()
                 task = asyncio.create_task(self._apply_proposal(prop))
@@ -854,17 +1266,21 @@ class MainWorkspaceControllerMixin:
             self.push_screen(HelpGlossaryModal(lang=self.lang))
 
     def action_toggle_telemetry(self) -> None:
-        self.query_one("#telemetry-panel", TelemetryPanel).toggle_class("hidden")
+        panel = self.query_one("#telemetry-panel", TelemetryPanel)
+        now_visible = panel.has_class("hidden")
+        self._sidebar_user_override = now_visible
+        panel.set_class(not now_visible, "hidden")
+        if self.current_state is not None:
+            self._refresh_ui()
 
     def action_toggle_verbosity(self) -> None:
         self.verbosity = "high" if self.verbosity == "low" else "low"
         for tr in self._transcripts.values():
             tr.set_verbosity(self.verbosity)
-        task = asyncio.create_task(self._append_notice(t(self.lang, "verbosity_notice", mode=self.verbosity)))
-        self._inflight_tasks.add(task)
-        task.add_done_callback(self._inflight_tasks.discard)
+        self._toast(t(self.lang, "verbosity_notice", mode=self.verbosity))
 
     async def action_cancel_turn(self) -> None:
+        self._turn_cancelled_flag = True
         await self.client.cancel_turn()
         self._set_working(False)
         await self._append_notice(t(self.lang, "turn_cancelled"), level="warn")

@@ -608,20 +608,32 @@ class PromptComposer(Vertical):
             ta.focus()
             self._hide_popup()
 
-    @on(TextArea.Changed, "#prompt-input")
-    def _on_ta_changed(self, event: TextArea.Changed) -> None:
-        self._update_popups_for_text(event.text_area.text)
-
-    @on(PromptTextArea.AttachmentsChanged)
-    def _on_attachments_changed(self) -> None:
+    def _refresh_attachment_bar(self) -> None:
         bar = self.query_one("#attachment-bar", Static)
-        summary = self.input_widget.get_attachment_summary()
+        ta = self.input_widget
+        parts: list[str] = []
+        summary = ta.get_attachment_summary()
         if summary:
-            bar.update(summary)
+            parts.append(summary)
+        expanded, _ = ta.expand_payload(ta.text)
+        if len(expanded) >= 300 or summary:
+            est_tokens = max(1, len(expanded) // 4)
+            parts.append(f"~{est_tokens:,} tok")
+        if parts:
+            bar.update("  ·  ".join(parts))
             bar.add_class("visible")
         else:
             bar.update("")
             bar.remove_class("visible")
+
+    @on(TextArea.Changed, "#prompt-input")
+    def _on_ta_changed(self, event: TextArea.Changed) -> None:
+        self._update_popups_for_text(event.text_area.text)
+        self._refresh_attachment_bar()
+
+    @on(PromptTextArea.AttachmentsChanged)
+    def _on_attachments_changed(self) -> None:
+        self._refresh_attachment_bar()
 
     @on(OptionList.OptionSelected, "#composer-popup")
     def _on_popup_selected(self, event: OptionList.OptionSelected) -> None:

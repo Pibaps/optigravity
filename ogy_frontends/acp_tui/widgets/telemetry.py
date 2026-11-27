@@ -56,7 +56,9 @@ class MetricGauge(Vertical):
         self.set_state(self._initial_progress, self._value_text, severity=self._severity)
 
     def set_label(self, label: str) -> None:
-        self.query_one(".gauge-label", Label).update(label)
+        self._label_text = label
+        if self.is_mounted:
+            self.query_one(".gauge-label", Label).update(label)
 
     def set_state(
         self,
@@ -67,6 +69,13 @@ class MetricGauge(Vertical):
         severity: str = "ok",
     ) -> None:
         clamped = max(0.0, min(100.0, float(percent)))
+        self._initial_progress = clamped
+        self._value_text = value_text
+        self._severity = severity
+        if label is not None:
+            self._label_text = label
+        if not self.is_mounted:
+            return
         if label is not None:
             self.query_one(".gauge-label", Label).update(label)
         self.query_one(".gauge-value", Label).update(value_text)

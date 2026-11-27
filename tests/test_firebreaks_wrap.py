@@ -57,7 +57,7 @@ def test_firebreak_anti_loop(tmp_path: Path) -> None:
 def test_firebreak_obese_read_and_lockfile(tmp_path: Path) -> None:
     cfg = _make_cfg(tmp_path)
     big_file = tmp_path / "big.py"
-    big_file.write_text("x = 1\n" * 4000, encoding="utf-8")
+    big_file.write_bytes(("x = 1234567\n" * 2500).encode("utf-8"))
 
     # Lockfile blocked
     res_lock = evaluate_pre_tool_firebreaks(

@@ -118,16 +118,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "cmd_clear": "Alias de /rotate (rotation propre)",
         "cmd_glossary": "Afficher la légende et le vocabulaire Optigravity",
         "cmd_help": "Afficher la liste des commandes slash",
-        # Phase 2 additions
-        "section_subagents": "SOUS-AGENTS",
+        # Phase 2 & V3.6 additions
         "subagents_empty": "Aucun sous-agent actif",
         "new_messages_pill": "↓ Nouveaux messages · End",
         "copied_notice": "Copié dans le presse-papiers ({chars} car.)",
+        "copied_code_notice": "Bloc de code copié ({chars} car.)",
+        "copy_empty": "Aucun message ou bloc de code à copier dans cette session.",
         "copy_btn": "Copier",
+        "copy_code_btn": "Copier code",
         "verbosity_notice": "Verbosité outils : {mode}",
         "pasted_chip": "[Pasted #{idx} · {lines} lignes]",
         "image_chip": "[Image #{idx}]",
         "reverse_search_placeholder": "Recherche historique (Ctrl+R) · Entrée valide · Échap annule…",
+        "transcript_search_placeholder": "Rechercher dans la conversation (Ctrl+F) · Entrée suivant · Échap fermer…",
+        "transcript_search_none": "0 résultat",
+        "transcript_search_count": "{cur}/{total}",
         "file_tree_hint": "Tab : vue arborescente · Entrée : insérer @chemin",
         "file_flat_hint": "Tab : liste fuzzy · Entrée : insérer @chemin",
         "perm_shortcuts": "[Y/1] Autoriser  [A/2] Toujours  [N/Échap] Refuser  [X] Jamais  [F] Plein écran",
@@ -154,6 +159,38 @@ STRINGS: dict[str, dict[str, str]] = {
         "activity_fetches": "{n} requête(s)",
         "thought_drawer": "Réflexion · {elapsed:.1f}s · {chars} car.",
         "diff_fullscreen": "Plein écran [F]",
+        # V3.6 Welcome, Themes, Queueing, Export & Status
+        "welcome_title": "Optigravity {version} · Compagnon ACP haute efficience",
+        "welcome_meta": "Espace : {workspace}{branch}  ·  Profil : {profile}  ·  Sous-agents : {subagents}",
+        "welcome_tips": "Entrée envoyer  ·  Shift+Entrée saut de ligne  ·  @fichier réf.  ·  Ctrl+F chercher  ·  Ctrl+P palette  ·  F1 glossaire",
+        "theme_status": "Thème actuel : {cur} · Disponibles : dark, light, high-contrast (usage : /theme <nom>)",
+        "theme_changed": "Thème changé → {val}",
+        "queue_status": "⏳ {n} en attente : « {preview} »",
+        "queue_clear_btn": "Vider",
+        "queue_added": "Prompt mis en file d'attente (#{n}) — envoi automatique à la fin du tour.",
+        "queue_cleared": "File d'attente vidée ({n} prompt(s)).",
+        "export_saved": "Conversation exportée : {path}",
+        "export_empty": "Aucun message à exporter dans cette session.",
+        "export_failed": "Échec de l'export : {err}",
+        "status_summary": "Session {sid} · Profil: {profile} · Modèle: {model} ({effort}/{mode}) · Contexte: {ctx} ({pct}%) · Cache: {cache} · Coût: ${cost:.4f} · API: ${api:.4f} ({runs} runs)",
+        "cmd_theme": "Changer le thème visuel (dark | light | high-contrast)",
+        "cmd_copy": "Copier la dernière réponse ou le dernier bloc de code (/copy [code])",
+        "cmd_export": "Exporter la session active en Markdown (/export [chemin])",
+        "cmd_status": "Afficher le résumé télémétrie de la session active",
+        "cmd_find": "Rechercher dans la conversation active (Ctrl+F)",
+        "cmd_clear_queue": "Vider les prompts en file d'attente",
+        "pal_theme": "Thème → {val}",
+        "pal_theme_help": "Basculer le thème visuel sur {val}",
+        "pal_copy_last": "Optigravity: Copier dernière réponse (/copy)",
+        "pal_copy_last_help": "Copie la dernière réponse assistant dans le presse-papiers",
+        "pal_copy_code": "Optigravity: Copier dernier bloc de code (/copy code)",
+        "pal_copy_code_help": "Copie le dernier bloc ```...``` sans les balises Markdown",
+        "pal_export": "Optigravity: Exporter la session en Markdown (/export)",
+        "pal_export_help": "Sauvegarde le transcript actif dans .ogy/exports/",
+        "pal_find": "Optigravity: Rechercher dans le transcript (Ctrl+F)",
+        "pal_find_help": "Ouvre la barre de recherche intra-conversation",
+        "pal_status": "Optigravity: Résumé de session (/status)",
+        "pal_status_help": "Affiche la télémétrie et le ROI de la session active",
     },
     "en": {
         "connecting": "Connecting to agy acp...",
@@ -268,16 +305,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "cmd_clear": "Alias for /rotate (clean rotation)",
         "cmd_glossary": "Open the Optigravity metrics & vocabulary glossary",
         "cmd_help": "Show slash commands help",
-        # Phase 2 additions
-        "section_subagents": "SUBAGENTS",
+        # Phase 2 & V3.6 additions
         "subagents_empty": "No active subagents",
         "new_messages_pill": "↓ New messages · End",
         "copied_notice": "Copied to clipboard ({chars} chars)",
+        "copied_code_notice": "Code block copied ({chars} chars)",
+        "copy_empty": "No assistant message or code block to copy in this session.",
         "copy_btn": "Copy",
+        "copy_code_btn": "Copy code",
         "verbosity_notice": "Tool verbosity: {mode}",
         "pasted_chip": "[Pasted #{idx} · {lines} lines]",
         "image_chip": "[Image #{idx}]",
         "reverse_search_placeholder": "Reverse history search (Ctrl+R) · Enter accepts · Esc cancels…",
+        "transcript_search_placeholder": "Search conversation (Ctrl+F) · Enter next · Esc close…",
+        "transcript_search_none": "0 matches",
+        "transcript_search_count": "{cur}/{total}",
         "file_tree_hint": "Tab: tree view · Enter: insert @path",
         "file_flat_hint": "Tab: fuzzy list · Enter: insert @path",
         "perm_shortcuts": "[Y/1] Allow  [A/2] Always  [N/Esc] Reject  [X] Reject always  [F] Fullscreen",
@@ -304,6 +346,38 @@ STRINGS: dict[str, dict[str, str]] = {
         "activity_fetches": "{n} fetch(es)",
         "thought_drawer": "Reasoning · {elapsed:.1f}s · {chars} chars",
         "diff_fullscreen": "Fullscreen [F]",
+        # V3.6 Welcome, Themes, Queueing, Export & Status
+        "welcome_title": "Optigravity {version} · High-efficiency ACP Companion",
+        "welcome_meta": "Workspace: {workspace}{branch}  ·  Profile: {profile}  ·  Subagents: {subagents}",
+        "welcome_tips": "Enter send  ·  Shift+Enter newline  ·  @file ref  ·  Ctrl+F search  ·  Ctrl+P palette  ·  F1 glossary",
+        "theme_status": "Current theme: {cur} · Available: dark, light, high-contrast (usage: /theme <name>)",
+        "theme_changed": "Theme switched → {val}",
+        "queue_status": "⏳ {n} queued: \"{preview}\"",
+        "queue_clear_btn": "Clear",
+        "queue_added": "Prompt queued (#{n}) — will dispatch automatically when the active turn finishes.",
+        "queue_cleared": "Prompt queue cleared ({n} prompt(s)).",
+        "export_saved": "Conversation exported: {path}",
+        "export_empty": "No messages to export in this session.",
+        "export_failed": "Export failed: {err}",
+        "status_summary": "Session {sid} · Profile: {profile} · Model: {model} ({effort}/{mode}) · Context: {ctx} ({pct}%) · Cache: {cache} · Cost: ${cost:.4f} · API: ${api:.4f} ({runs} runs)",
+        "cmd_theme": "Switch visual theme (dark | light | high-contrast)",
+        "cmd_copy": "Copy last assistant response or last code block (/copy [code])",
+        "cmd_export": "Export active session to Markdown (/export [path])",
+        "cmd_status": "Show inline telemetry summary for the active session",
+        "cmd_find": "Search inside the active conversation (Ctrl+F)",
+        "cmd_clear_queue": "Clear queued prompts for this session",
+        "pal_theme": "Theme → {val}",
+        "pal_theme_help": "Switch UI theme to {val}",
+        "pal_copy_last": "Optigravity: Copy Last Response (/copy)",
+        "pal_copy_last_help": "Copy the latest assistant message to the clipboard",
+        "pal_copy_code": "Optigravity: Copy Last Code Block (/copy code)",
+        "pal_copy_code_help": "Copy the latest ```...``` code block without Markdown fences",
+        "pal_export": "Optigravity: Export Session to Markdown (/export)",
+        "pal_export_help": "Save the active transcript to .ogy/exports/",
+        "pal_find": "Optigravity: Search Transcript (Ctrl+F)",
+        "pal_find_help": "Open the in-conversation search bar",
+        "pal_status": "Optigravity: Session Status (/status)",
+        "pal_status_help": "Display live telemetry and ROI for the active session",
     },
 }
 
@@ -350,7 +424,7 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 ## Santé du contexte (Zones)
 - **SAIN (`keep_warm`)** : `< 60K` tokens et cache actif. Gardez la session chaude pour profiter du tarif cache réduit.
 - **ATTENTION (`frugal_btw`)** : `60K–100K` tokens, `15–25` tours, ou cache `< 60%`. Évitez les lectures inutiles et utilisez **`/btw <question>`** pour les questions annexes courtes.
-- **SATURÉ (`clear_handoff`)** : `>= 100K` tokens ou cache expiré (`> 180s` d'inactivité au-delà de 60K). Utilisez **`/rotate`** (`Ctrl+R`) pour repartir sur une session neuve via `.ogy/handoff.md`.
+- **SATURÉ (`clear_handoff`)** : `>= 100K` tokens ou cache expiré (`> 180s` d'inactivité au-delà de 60K). Utilisez **`/rotate`** (ou `Alt+R`) pour repartir sur une session neuve via `.ogy/handoff.md`.
 - **SATURÉ (`compact`)** : compaction rentable uniquement s'il reste suffisamment de tours sans erreurs.
 - **ÉCHECS (`rewind`)** : `>= 2` échecs d'outils consécutifs. Ne compactez jamais des erreurs ; changez d'approche ou faites une rotation.
 
@@ -366,13 +440,18 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 - **Tiers / Claude (`3p-5h` / `3p-weekly`)** : **`3p` = Third-Party** (modèles tiers comme Claude 5.5 inclus dans votre abonnement Google AI Pro/Ultra, avec quota distinct de Gemini).
 
 ## Raccourcis & Commandes utiles
+- `/theme dark|light|high-contrast` : changer le thème visuel
 - `/lang fr` ou `/lang en` : changer la langue de l'interface
 - `/btw <question>` : poser une question annexe concise sans modifier de fichiers
-- `Ctrl+P` : Palette de commandes complète (modèles, modes, efforts, langue, rotation, glossaire…)
-- `Tab` : Auto-compléter une commande `/` ou son argument
+- `/copy [code]` · `/export [chemin]` · `/status` : copier, exporter en Markdown, ou résumer la session
+- `Ctrl+P` : Palette de commandes complète (modèles, modes, efforts, thèmes, langue, rotation, glossaire…)
+- `Ctrl+F` : Rechercher dans la conversation active
+- `Ctrl+R` : Recherche inverse dans l'historique des prompts
+- `Ctrl+S` : Sélecteur de sessions fuzzy (`/resume`)
+- `Ctrl+O` : Basculer la verbosité des cartes outils
 - `Ctrl+B` : Afficher / masquer le panneau télémétrie
 - `Ctrl+C` : Annuler le tour en cours sans fermer `agy acp`
-- `Ctrl+R` : Lancer une rotation propre (`/rotate`)
+- `Alt+R` / `Alt+D` / `Alt+U` : Appliquer une proposition d'orchestration (rotation, délégation, escalade)
 - `F1` : Ouvrir / fermer ce glossaire
 """,
     "en": """\
@@ -381,7 +460,7 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 ## Context Health (Zones)
 - **HEALTHY (`keep_warm`)**: `< 60K` tokens with warm cache. Keep the session warm for discounted cached input.
 - **CAUTION (`frugal_btw`)**: `60K–100K` tokens, `15–25` turns, or cache `< 60%`. Avoid unnecessary reads and use **`/btw <question>`** for brief side questions.
-- **SATURATED (`clear_handoff`)**: `>= 100K` tokens or cold cache (`> 180s` idle above 60K). Run **`/rotate`** (`Ctrl+R`) to start fresh via `.ogy/handoff.md`.
+- **SATURATED (`clear_handoff`)**: `>= 100K` tokens or cold cache (`> 180s` idle above 60K). Run **`/rotate`** (or `Alt+R`) to start fresh via `.ogy/handoff.md`.
 - **SATURATED (`compact`)**: compaction breaks even only if enough error-free turns remain.
 - **FAILURES (`rewind`)**: `>= 2` consecutive tool errors. Never compact failures; change strategy or rotate.
 
@@ -397,13 +476,18 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 - **3rd-Party / Claude (`3p-5h` / `3p-weekly`)**: **`3p` = Third-Party** (non-Gemini models such as Claude 5.5 included in Google AI Pro/Ultra, tracked separately).
 
 ## Useful Shortcuts & Commands
+- `/theme dark|light|high-contrast`: switch visual theme
 - `/lang en` or `/lang fr`: switch UI language
 - `/btw <question>`: ask a concise side question without editing files
-- `Ctrl+P`: Full Command Palette (models, modes, efforts, language, rotation, glossary…)
-- `Tab`: Autocomplete a `/` command or argument
+- `/copy [code]` · `/export [path]` · `/status`: copy, export to Markdown, or inspect session summary
+- `Ctrl+P`: Full Command Palette (models, modes, efforts, themes, language, rotation, glossary…)
+- `Ctrl+F`: Search inside the active conversation
+- `Ctrl+R`: Reverse prompt history search
+- `Ctrl+S`: Fuzzy session switcher (`/resume`)
+- `Ctrl+O`: Toggle tool card verbosity
 - `Ctrl+B`: Toggle telemetry sidebar
 - `Ctrl+C`: Cancel the active turn without killing `agy acp`
-- `Ctrl+R`: Clean session rotation (`/rotate`)
+- `Alt+R` / `Alt+D` / `Alt+U`: Apply an orchestration proposal (rotate, delegate, upgrade)
 - `F1`: Open / close this glossary
 """,
 }

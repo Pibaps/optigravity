@@ -121,51 +121,63 @@ def _measure_hook_latency_ms() -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
-def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) -> int:
+def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False, as_json: bool = False) -> int:
     """Check local environment, JSON configs, permissions, hook latency, SQLite WAL, and optionally fix anomalies."""
     cfg = load_config()
     anomalies: list[tuple[str, str]] = []
+    report_checks: dict[str, Any] = {}
 
-    print(f"version     : optigravity {get_version()}")
-    print(f"profile_mode: {cfg.profile_mode} | isolate_hooks={cfg.isolate_hooks}")
-    print(f"config_path : {cfg.config_path} (exists={cfg.config_path.is_file()})")
-    print(f"db_path     : {cfg.db_path} (exists={cfg.db_path.is_file()})")
-    print(f"agy_cli_dir : {cfg.agy_cli_dir} (exists={cfg.agy_cli_dir.is_dir()})")
-    print(f"agy_cfg_dir : {cfg.agy_config_dir} (exists={cfg.agy_config_dir.is_dir()})")
-    print(f"language    : {cfg.language} | overwrite_ok={cfg.overwrite_verified_ok}")
+    def _emit(line: str) -> None:
+        if not as_json:
+            print(line)
+
+    _emit(f"version     : optigravity {get_version()}")
+    _emit(f"profile_mode: {cfg.profile_mode} | isolate_hooks={cfg.isolate_hooks}")
+    _emit(f"config_path : {cfg.config_path} (exists={cfg.config_path.is_file()})")
+    _emit(f"db_path     : {cfg.db_path} (exists={cfg.db_path.is_file()})")
+    _emit(f"agy_cli_dir : {cfg.agy_cli_dir} (exists={cfg.agy_cli_dir.is_dir()})")
+    _emit(f"agy_cfg_dir : {cfg.agy_config_dir} (exists={cfg.agy_config_dir.is_dir()})")
+    _emit(f"language    : {cfg.language} | overwrite_ok={cfg.overwrite_verified_ok}")
 
     # 0. V3.1 profile isolation, OAuth links, shared residues & backups checks
     from ogy_core.profile import (
         check_oauth_links,
         detect_ogy_residues_in_shared_gemini,
+        link_oauth_to_isolated_profile,
         list_gemini_backups,
     )
 
     backups_dir = cfg.backups_dir or (Path.home() / ".local" / "share" / "optigravity" / "backups")
     snaps = list_gemini_backups(backups_dir)
     if snaps:
-        print(f"backups     : OK ({len(snaps)} snapshot(s), latest={snaps[-1]['snapshot_id']})")
+        _emit(f"backups     : OK ({len(snaps)} snapshot(s), latest={snaps[-1]['snapshot_id']})")
+        report_checks["backups"] = {"status": "ok", "count": len(snaps), "latest": snaps[-1]["snapshot_id"]}
     else:
-        print(f"backups     : none ({backups_dir})")
+        _emit(f"backups     : none ({backups_dir})")
+        report_checks["backups"] = {"status": "none", "count": 0}
 
+    shared_dir = cfg.shared_gemini_dir or (Path.home() / ".gemini")
+    iso_dir = cfg.gemini_home or cfg.agy_cli_dir.parent
     if cfg.profile_mode == "isolated":
-        shared_dir = cfg.shared_gemini_dir or (Path.home() / ".gemini")
-        iso_dir = cfg.gemini_home or cfg.agy_cli_dir.parent
         oauth_ok, oauth_details = check_oauth_links(shared_dir, iso_dir)
-        print(f"oauth_links : {'OK' if oauth_ok else 'WARN'} ({'; '.join(oauth_details)})")
+        _emit(f"oauth_links : {'OK' if oauth_ok else 'WARN'} ({'; '.join(oauth_details)})")
+        report_checks["oauth_links"] = {"status": "ok" if oauth_ok else "warn", "details": oauth_details}
         if not oauth_ok:
             anomalies.append(("oauth_links", "; ".join(oauth_details)))
 
         residues = detect_ogy_residues_in_shared_gemini(shared_dir)
         if residues:
-            print(f"shared_clean: WARN (ogy-managed residues in {shared_dir}: {', '.join(residues)})")
+            _emit(f"shared_clean: WARN (ogy-managed residues in {shared_dir}: {', '.join(residues)})")
+            report_checks["shared_clean"] = {"status": "warn", "residues": residues}
             anomalies.append(("shared_residues", f"ogy-managed residues in {shared_dir}: {', '.join(residues)}"))
         else:
-            print(f"shared_clean: OK ({shared_dir} has no ogy-managed residues)")
+            _emit(f"shared_clean: OK ({shared_dir} has no ogy-managed residues)")
+            report_checks["shared_clean"] = {"status": "ok", "residues": []}
 
     # 1. agy binary check
     agy_bin = shutil.which("agy")
-    print(f"agy_binary  : {agy_bin or 'NOT FOUND'}")
+    _emit(f"agy_binary  : {agy_bin or 'NOT FOUND'}")
+    report_checks["agy_binary"] = {"status": "ok" if agy_bin else "warn", "path": agy_bin}
     if not agy_bin:
         anomalies.append(("agy_missing", "agy binary not found in PATH"))
 
@@ -176,7 +188,8 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
         ("mcp_config.json", cfg.agy_config_dir / "mcp_config.json"),
     ):
         ok, detail = _check_json_file(p)
-        print(f"json:{label:<15}: {'OK' if ok else 'FAIL'} ({detail})")
+        _emit(f"json:{label:<15}: {'OK' if ok else 'FAIL'} ({detail})")
+        report_checks[f"json:{label}"] = {"status": "ok" if ok else "fail", "detail": detail}
         if not ok:
             anomalies.append((f"json_{label}", f"{p}: {detail}"))
 
@@ -185,13 +198,16 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
 
     cfg_errors = validate_config_file(cfg.config_path)
     if not cfg.config_path.is_file():
-        print("config_toml : MISSING (can be generated with --fix)")
+        _emit("config_toml : MISSING (can be generated with --fix)")
+        report_checks["config_toml"] = {"status": "missing"}
         anomalies.append(("missing_config_toml", f"Create default {cfg.config_path}"))
     elif cfg_errors:
-        print(f"config_toml : FAIL ({'; '.join(cfg_errors)})")
+        _emit(f"config_toml : FAIL ({'; '.join(cfg_errors)})")
+        report_checks["config_toml"] = {"status": "fail", "errors": cfg_errors}
         anomalies.append(("invalid_config_toml", "; ".join(cfg_errors)))
     else:
-        print("config_toml : OK")
+        _emit("config_toml : OK")
+        report_checks["config_toml"] = {"status": "ok"}
 
     # 4. secrets.env permissions check
     secrets_path = cfg.config_path.parent / "secrets.env"
@@ -199,14 +215,18 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
         if os.name != "nt":
             mode = stat.S_IMODE(secrets_path.stat().st_mode)
             if mode & 0o077:
-                print(f"secrets.env : WARN (mode {oct(mode)}, expected 0o600)")
+                _emit(f"secrets.env : WARN (mode {oct(mode)}, expected 0o600)")
+                report_checks["secrets_env"] = {"status": "warn", "mode": oct(mode)}
                 anomalies.append(("secrets_perms", f"chmod 0600 {secrets_path}"))
             else:
-                print(f"secrets.env : OK (mode {oct(mode)})")
+                _emit(f"secrets.env : OK (mode {oct(mode)})")
+                report_checks["secrets_env"] = {"status": "ok", "mode": oct(mode)}
         else:
-            print("secrets.env : OK (present on Windows)")
+            _emit("secrets.env : OK (present on Windows)")
+            report_checks["secrets_env"] = {"status": "ok"}
     else:
-        print("secrets.env : not present")
+        _emit("secrets.env : not present")
+        report_checks["secrets_env"] = {"status": "absent"}
 
     # 5. SQLite WAL + quick_check + schema version
     conn = connect(cfg.db_path, init_schema=True)
@@ -214,7 +234,14 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
         jm = conn.execute("PRAGMA journal_mode;").fetchone()[0]
         uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
         qc = conn.execute("PRAGMA quick_check;").fetchone()[0]
-        print(f"sqlite_wal  : journal_mode={jm}, user_version={uv}/{CURRENT_SCHEMA_VERSION}, quick_check={qc}")
+        _emit(f"sqlite_wal  : journal_mode={jm}, user_version={uv}/{CURRENT_SCHEMA_VERSION}, quick_check={qc}")
+        report_checks["sqlite_wal"] = {
+            "status": "ok" if str(qc).lower() == "ok" else "fail",
+            "journal_mode": jm,
+            "user_version": uv,
+            "schema_version": CURRENT_SCHEMA_VERSION,
+            "quick_check": qc,
+        }
         if str(qc).lower() != "ok":
             anomalies.append(("sqlite_corrupt", f"PRAGMA quick_check returned {qc}"))
     finally:
@@ -223,24 +250,27 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
     # 6. Hook hot-path latency (< 25ms target)
     lat_ms = _measure_hook_latency_ms()
     lat_status = "OK" if lat_ms < 25.0 else "WARN"
-    print(f"hook_latency: {lat_ms:.2f} ms ({lat_status}, target < 25 ms)")
+    _emit(f"hook_latency: {lat_ms:.2f} ms ({lat_status}, target < 25 ms)")
+    report_checks["hook_latency"] = {"status": lat_status.lower(), "ms": round(lat_ms, 2)}
 
     # 7. Gemini API key check (0 tokens, respects privacy_mode + 3-step secrets cascade)
     api_status, api_detail = _check_gemini_api_key(
         privacy_mode=cfg.subagents_privacy_mode,
         secrets_path=secrets_path,
     )
-    print(f"gemini_api  : {api_status.upper()} ({api_detail})")
+    _emit(f"gemini_api  : {api_status.upper()} ({api_detail})")
+    report_checks["gemini_api"] = {"status": api_status, "detail": api_detail}
 
     # Optional --fix for deterministic anomalies
+    fixed_actions: list[str] = []
     if fix and anomalies:
-        fixable = [a for a in anomalies if a[0] in ("missing_config_toml", "secrets_perms")]
+        fixable = [a for a in anomalies if a[0] in ("missing_config_toml", "secrets_perms", "oauth_links")]
         if fixable:
-            proceed = yes or not bool(getattr(sys.stdin, "isatty", lambda: False)())
+            proceed = yes or as_json or not bool(getattr(sys.stdin, "isatty", lambda: False)())
             if not proceed:
-                print("\nFixable anomalies detected:")
+                _emit("\nFixable anomalies detected:")
                 for _code, desc in fixable:
-                    print(f"  - {desc}")
+                    _emit(f"  - {desc}")
                 try:
                     ans = input("Apply fixes now? [y/N]: ").strip().lower()
                 except EOFError:
@@ -251,10 +281,19 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
                     if code == "missing_config_toml":
                         cfg.config_path.parent.mkdir(parents=True, exist_ok=True)
                         cfg.config_path.write_text(render_default_config_toml(), encoding="utf-8")
-                        print(f"[fixed] Created {cfg.config_path}")
+                        msg = f"[fixed] Created {cfg.config_path}"
+                        _emit(msg)
+                        fixed_actions.append(msg)
                     elif code == "secrets_perms" and os.name != "nt":
                         os.chmod(secrets_path, 0o600)
-                        print(f"[fixed] Set mode 0600 on {secrets_path}")
+                        msg = f"[fixed] Set mode 0600 on {secrets_path}"
+                        _emit(msg)
+                        fixed_actions.append(msg)
+                    elif code == "oauth_links" and cfg.profile_mode == "isolated":
+                        link_oauth_to_isolated_profile(shared_dir, iso_dir)
+                        msg = f"[fixed] Re-linked OAuth credentials from {shared_dir} -> {iso_dir}"
+                        _emit(msg)
+                        fixed_actions.append(msg)
                 # Also run passive WAL checkpoint
                 c2 = connect(cfg.db_path, init_schema=True)
                 try:
@@ -262,7 +301,27 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
                 finally:
                     c2.close()
         else:
-            print("\nNo automatically fixable anomalies.")
+            _emit("\nNo automatically fixable anomalies.")
+
+    if as_json:
+        payload = {
+            "version": get_version(),
+            "profile_mode": cfg.profile_mode,
+            "isolate_hooks": cfg.isolate_hooks,
+            "checks": report_checks,
+            "anomalies": [{"code": c, "detail": d} for c, d in anomalies],
+            "fixed": fixed_actions,
+            "healthy": len(anomalies) == 0,
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if not anomalies:
+        _emit("summary     : OK (0 anomalies)")
+    else:
+        has_fixable = any(a[0] in ("missing_config_toml", "secrets_perms", "oauth_links") for a in anomalies)
+        hint = " (run 'ogy doctor --fix' to repair auto-fixable issues)" if has_fixable else ""
+        _emit(f"summary     : {len(anomalies)} anomaly(ies) detected{hint}")
 
     if not probe_agy:
         return 0
@@ -402,8 +461,27 @@ def cmd_waste(
     return 0
 
 
+def _suggest_subcommand(bad_cmd: str, valid_cmds: Sequence[str]) -> str | None:
+    import difflib
+
+    matches = difflib.get_close_matches(bad_cmd, valid_cmds, n=1, cutoff=0.55)
+    return matches[0] if matches else None
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ogy", description="Optigravity CLI for Google Antigravity")
+    parser = argparse.ArgumentParser(
+        prog="ogy",
+        description="Optigravity CLI for Google Antigravity",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Quick-start examples:\n"
+            "  ogy init --isolated       Safe isolated install (keeps ~/.gemini untouched)\n"
+            "  ogy tui                   Interactive ACP TUI with live telemetry & themes\n"
+            "  ogy run \"fix bug\"         Route prompt and launch agy with direct TTY\n"
+            "  ogy stats --last 10       Inspect ROI, cache savings & subagent spend\n"
+            "  ogy doctor --fix          Verify health and auto-repair common issues"
+        ),
+    )
     parser.add_argument("-V", "--version", action="version", version=f"optigravity {get_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -420,6 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--probe-agy", action="store_true", help="Run Phase 0 probes against local agy")
     p_doc.add_argument("--fix", action="store_true", help="Repair deterministic configuration/permission anomalies")
     p_doc.add_argument("-y", "--yes", action="store_true", help="Confirm --fix without prompting")
+    p_doc.add_argument("--json", action="store_true", help="Emit machine-readable JSON health report")
 
     p_stats = sub.add_parser("stats", help="Show session KPI statistics and ROI summary")
     p_stats.add_argument("--session", default=None)
@@ -504,6 +583,12 @@ def build_parser() -> argparse.ArgumentParser:
         p_tui.add_argument("--model", default=None, help="Pin initial model (disables 1st-prompt auto-routing)")
         p_tui.add_argument("--effort", default=None, help="Pin initial effort (disables 1st-prompt auto-routing)")
         p_tui.add_argument("--lang", default="fr", choices=["fr", "en"], help="TUI language (fr or en)")
+        p_tui.add_argument(
+            "--theme",
+            default=None,
+            choices=["dark", "light", "high-contrast"],
+            help="TUI visual theme (dark, light, or high-contrast)",
+        )
 
     p_eval = sub.add_parser("router-eval", help="Offline shadow evaluation of Stage 2 bandit")
     p_eval.add_argument("--category", default=None)
@@ -513,9 +598,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_KNOWN_COMMANDS = (
+    "run", "doctor", "stats", "waste", "init", "backup", "restore",
+    "uninstall", "config", "audit", "wrap", "raw", "recall", "tui", "chat", "router-eval",
+)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and not raw_argv[0].startswith("-") and raw_argv[0] not in _KNOWN_COMMANDS:
+        suggestion = _suggest_subcommand(raw_argv[0], _KNOWN_COMMANDS)
+        msg = f"[ogy] Unknown command '{raw_argv[0]}'."
+        if suggestion:
+            msg += f" Did you mean 'ogy {suggestion}'?"
+        msg += " Run 'ogy --help' for available commands."
+        print(msg, file=sys.stderr)
+        return 2
+
     parser = build_parser()
-    args, unknown = parser.parse_known_args(argv)
+    args, unknown = parser.parse_known_args(raw_argv)
 
     if args.command == "run":
         return run_agy(
@@ -529,7 +630,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             extra_args=unknown,
         )
     if args.command == "doctor":
-        return cmd_doctor(probe_agy=args.probe_agy, fix=args.fix, yes=args.yes)
+        return cmd_doctor(probe_agy=args.probe_agy, fix=args.fix, yes=args.yes, as_json=args.json)
     if args.command == "stats":
         return cmd_stats(
             session_id=args.session,
@@ -636,6 +737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             effort=args.effort,
             lang=args.lang,
+            theme=args.theme,
         )
     if args.command == "router-eval":
         from ogy_core.router import evaluate_bandit_offline

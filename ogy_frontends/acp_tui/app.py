@@ -52,8 +52,11 @@ __all__ = [
 ]
 
 
+SUPPORTED_THEMES = ("dark", "light", "high-contrast")
+
+
 class OptigravityCommandProvider(Provider):
-    """Exposes Optigravity TUI commands, models, efforts, modes, and languages in `Ctrl+P`."""
+    """Exposes Optigravity TUI commands, models, efforts, modes, themes, and languages in `Ctrl+P`."""
 
     def _build_entries(self) -> list[tuple[str, str, Any]]:
         app = self.app
@@ -62,6 +65,11 @@ class OptigravityCommandProvider(Provider):
         lang = app.lang
         entries: list[tuple[str, str, Any]] = [
             (t(lang, "pal_glossary"), t(lang, "pal_glossary_help"), app.action_show_glossary),
+            (t(lang, "pal_find"), t(lang, "pal_find_help"), app.action_open_transcript_search),
+            (t(lang, "pal_status"), t(lang, "pal_status_help"), lambda: app._run_palette_cmd("/status")),
+            (t(lang, "pal_copy_last"), t(lang, "pal_copy_last_help"), lambda: app._run_palette_cmd("/copy")),
+            (t(lang, "pal_copy_code"), t(lang, "pal_copy_code_help"), lambda: app._run_palette_cmd("/copy code")),
+            (t(lang, "pal_export"), t(lang, "pal_export_help"), lambda: app._run_palette_cmd("/export")),
             (t(lang, "pal_rotate"), t(lang, "pal_rotate_help"), app.action_open_rotation_review),
             (t(lang, "pal_delegate"), t(lang, "pal_delegate_help"), app.action_open_delegation_modal),
             (t(lang, "pal_handoff"), t(lang, "pal_handoff_help"), lambda: app._run_palette_cmd("/handoff")),
@@ -74,6 +82,8 @@ class OptigravityCommandProvider(Provider):
         if app.active_proposals:
             top = app.active_proposals[0]
             entries.insert(0, (t(lang, "pal_proposal", title=top.title), top.detail, app.action_accept_proposal))
+        for th in SUPPORTED_THEMES:
+            entries.append((t(lang, "pal_theme", val=th), t(lang, "pal_theme_help", val=th), lambda x=th: app._run_palette_cmd(f"/theme {x}")))
         for code, label in (("fr", "Français (fr)"), ("en", "English (en)")):
             entries.append((t(lang, "pal_lang", label=label), t(lang, "pal_lang_help", label=label), lambda c=code: app._run_palette_cmd(f"/lang {c}")))
         for model in app.get_available_models():
@@ -106,6 +116,7 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_turn", "Cancel", show=True, priority=True),
+        Binding("ctrl+f", "open_transcript_search", "Find", show=True),
         Binding("ctrl+n", "new_session", "New", show=True),
         Binding("ctrl+s", "open_session_picker", "Sessions", show=True),
         Binding("ctrl+o", "toggle_verbosity", "Tools", show=True),
@@ -125,11 +136,14 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
         initial_model: str | None = None,
         initial_effort: str | None = None,
         lang: str = "fr",
+        tui_theme: str | None = None,
         subagents_service: Any = None,
     ) -> None:
         super().__init__()
         self.lang = lang if lang in SUPPORTED_LANGS else "fr"
         self.ogy_config = ogy_config or load_config()
+        resolved_theme = (tui_theme or self.ogy_config.tui_theme or "dark").strip().lower()
+        self.tui_theme = resolved_theme if resolved_theme in SUPPORTED_THEMES else "dark"
         self.client_config = client_config or AcpClientConfig()
         self.initial_prompt = initial_prompt
         self.initial_model = initial_model
@@ -156,6 +170,13 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
         self._inflight_tasks: set[asyncio.Task[Any]] = set()
         self.verbosity: str = "low"
 
+        # V3.6 UX state (responsive sidebar, git branch, queue cancel guard, search)
+        self._git_branch: str = ""
+        self._sidebar_user_override: bool | None = None
+        self._turn_cancelled_flag: bool = False
+        self._search_matches: list[Any] = []
+        self._search_idx: int = 0
+
         # Working spinner state
         self._working: bool = False
         self._working_label: str = ""
@@ -175,6 +196,7 @@ def run_tui(
     model: str | None = None,
     effort: str | None = None,
     lang: str = "fr",
+    theme: str | None = None,
     command_override: list[str] | None = None,
 ) -> int:
     """Launch the Optigravity Textual TUI."""
@@ -207,6 +229,7 @@ def run_tui(
         initial_model=model,
         initial_effort=effort,
         lang=lang,
+        tui_theme=theme,
     )
     app.run()
     return 0
