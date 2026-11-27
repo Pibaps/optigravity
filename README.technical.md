@@ -1,61 +1,61 @@
-# Optigravity (`ogy`) — Référence Technique & Architecture
+# Optigravity (`ogy`) — Technical Reference & Architecture
 
-> Documentation technique destinée aux développeurs, mainteneurs et contributeurs.  
-> Pour l'installation, le démarrage rapide et le guide d'utilisation, voir le [Manuel Utilisateur (`README.md`)](README.md).  
-> Pour les résultats A/B détaillés et la méthodologie, voir [BENCHMARKS.md](BENCHMARKS.md).
-
----
-
-## Table des matières
-
-1. [Architecture globale & Flux de données](#1-architecture-globale--flux-de-données)
-2. [Cartographie des packages & Packaging (`PEP 621`)](#2-cartographie-des-packages--packaging-pep-621)
-3. [Persistance SQLite WAL & Modèle de données](#3-persistance-sqlite-wal--modèle-de-données)
-4. [Routage 2-Étages, Santé du Contexte & Tarification](#4-routage-2-étages-santé-du-contexte--tarification)
-5. [Hooks Fail-Open, Coupe-Feu & Compression Shell](#5-hooks-fail-open-coupe-feu--compression-shell)
-6. [Frontend Interactif ACP TUI (`ogy tui`)](#6-frontend-interactif-acp-tui-ogy-tui)
-7. [Serveurs MCP (`ogy-mcp` & `ogy-subagents`)](#7-serveurs-mcp-ogy-mcp--ogy-subagents)
-8. [Fichiers d'état, Secrets & Précédence de configuration](#8-fichiers-détat-secrets--précédence-de-configuration)
-9. [Développement, Tests & Conventions d'ingénierie](#9-développement-tests--conventions-dingénierie)
+> Technical documentation for developers, maintainers, and contributors.  
+> For installation, quick start, and usage instructions, see the [User Manual (`README.md`)](README.md).  
+> For detailed A/B benchmark results and methodology, see [BENCHMARKS.md](BENCHMARKS.md).
 
 ---
 
-## 1. Architecture globale & Flux de données
+## Table of Contents
 
-Optigravity (`ogy`) s'insère autour de Google Antigravity CLI (`agy`) sans jamais modifier ses binaires ni intercepter son TTY via un proxy PTY. L'architecture sépare strictement un **noyau V1 100 % stdlib** (latence `< 20 ms`, zéro dépendance tierce) des **extensions modulaires** (TUI ACP, serveurs MCP, sous-agents hybrides Gemini API).
+1. [Global Architecture & Data Flow](#1-global-architecture--data-flow)
+2. [Package Map & Packaging (`PEP 621`)](#2-package-map--packaging-pep-621)
+3. [SQLite WAL Persistence & Data Model](#3-sqlite-wal-persistence--data-model)
+4. [2-Stage Routing, Context Health & Pricing](#4-2-stage-routing-context-health--pricing)
+5. [Fail-Open Hooks, Firebreaks & Shell Compression](#5-fail-open-hooks-firebreaks--shell-compression)
+6. [Interactive ACP TUI Frontend (`ogy tui`)](#6-interactive-acp-tui-frontend-ogy-tui)
+7. [MCP Servers (`ogy-mcp` & `ogy-subagents`)](#7-mcp-servers-ogy-mcp--ogy-subagents)
+8. [State Files, Secrets & Configuration Precedence](#8-state-files-secrets--configuration-precedence)
+9. [Development, Testing & Engineering Conventions](#9-development-testing--engineering-conventions)
+
+---
+
+## 1. Global Architecture & Data Flow
+
+Optigravity (`ogy`) wraps around Google Antigravity CLI (`agy`) without ever modifying its binaries or intercepting its TTY through a PTY proxy. The architecture strictly separates a **100% stdlib V1 core** (`< 20 ms` latency, zero third-party dependencies) from **modular extensions** (ACP TUI, MCP servers, hybrid Gemini API subagents).
 
 ```mermaid
 flowchart LR
-    subgraph User["Surfaces Utilisateur"]
+    subgraph User["User Surfaces"]
         CLI["ogy CLI\n(run, wrap, stats, waste, doctor)"]
         TUI["ogy tui\n(Textual 8+ / ACP v1)"]
     end
 
     subgraph Agy["Google Antigravity CLI (agy)"]
-        AGY_TTY["agy (TTY natif)"]
+        AGY_TTY["agy (native TTY)"]
         AGY_ACP["agy acp (JSON-RPC 2.0 stdio)"]
     end
 
-    subgraph Runtime["Hot Path Stdlib (< 20 ms)"]
+    subgraph Runtime["Stdlib Hot Path (< 20 ms)"]
         HOOK["ogy-hook\n(session-start, pre/post-tool,\npre/post-invocation, stop)"]
-        HUD["ogy-hook statusline\n(HUD ANSI debounced 10s)"]
+        HUD["ogy-hook statusline\n(10s debounced ANSI HUD)"]
         WRAP["ogy wrap / recall\n(dual-thread drain + stash)"]
     end
 
-    subgraph MCP["Serveurs MCP stdio (eager: false)"]
+    subgraph MCP["stdio MCP Servers (eager: false)"]
         OGY_MCP["ogy-mcp\n(budget, recall, handoff)"]
         SUB["ogy-subagents\n(L1 stateless + L2 read-only)"]
     end
 
-    subgraph State["État Local"]
+    subgraph State["Local State"]
         DB[("ogy.db\nSQLite WAL v2")]
         STASH[("stash/<hash>/\nstdout, stderr, meta")]
         PENDING[("pending_tasks/\nTTL 30s")]
     end
 
-    subgraph External["Backends LLM"]
+    subgraph External["LLM Backends"]
         OAUTH["OAuth Personal / Pro / Ultra"]
-        GAPI["Gemini API\n(Projet A Free / Projet B Tier 1)"]
+        GAPI["Gemini API\n(Project A Free / Project B Tier 1)"]
     end
 
     CLI -->|"pending_tasks + exec TTY"| AGY_TTY
@@ -85,33 +85,33 @@ flowchart LR
     AGY_ACP --> OAUTH
 ```
 
-### Invariants architecturaux clés
+### Key Architectural Invariants
 
-* **Zero PTY Proxy** : `ogy run` délègue le TTY natif directement à `agy` (`AGY_CLI_DISABLE_AUTO_UPDATE=true`, `OGY_TASK_ID`, `OGY_SESSION_META`).
-* **Hot path 100 % stdlib** : `ogy_core`, `ogy_cli`, `ogy_hooks` et `ogy_statusline` n'importent aucune bibliothèque tierce ; les extras (`mcp`, `textual`, `agent-client-protocol`, `google-genai`, `keyring`) sont chargés paresseusement (*lazy imports*) avec message d'installation explicite en cas d'absence.
-* **Fail-open absolu sur les hooks** : `ogy-hook` encapsule `main()` dans `try/except BaseException` afin qu'aucune exception ne bloque jamais `agy`.
-* **Conformité ToS Section 6** : les actions d'orchestration dans `ogy tui` (rotation, upgrade, délégation, bascule Claude 5.5 vers V1 `ogy run`) sont toujours confirmées par l'utilisateur en une touche ; le mode `yolo` est explicitement banni côté client ACP.
+* **Zero PTY Proxy**: `ogy run` hands the native TTY directly to `agy` (`AGY_CLI_DISABLE_AUTO_UPDATE=true`, `OGY_TASK_ID`, `OGY_SESSION_META`).
+* **100% Stdlib Hot Path**: `ogy_core`, `ogy_cli`, `ogy_hooks`, and `ogy_statusline` import no third-party libraries; optional extras (`mcp`, `textual`, `agent-client-protocol`, `google-genai`, `keyring`) are lazy-loaded with actionable install hints when absent.
+* **Strict Fail-Open Hooks**: `ogy-hook` wraps `main()` in `try/except BaseException` so no hook exception can ever block `agy`.
+* **ToS Section 6 Compliance**: orchestration actions in `ogy tui` (rotation, upgrade, delegation, switching Claude 5.5 to V1 `ogy run`) are always confirmed by the user with a single keystroke; `yolo` mode is explicitly banned on the ACP client side.
 
 ---
 
-## 2. Cartographie des packages & Packaging (`PEP 621`)
+## 2. Package Map & Packaging (`PEP 621`)
 
-Le projet utilise `hatchling>=1.25.0` (`pyproject.toml`, Python `>=3.12`, version `0.2.0` exposée via `importlib.metadata` dans `ogy_core.get_version()`).
+The project uses `hatchling>=1.25.0` (`pyproject.toml`, Python `>=3.12`, version `0.2.0` exposed via `importlib.metadata` in `ogy_core.get_version()`).
 
-### Packages & responsabilités
+### Packages & Responsibilities
 
-| Package / Répertoire | Dépendances | Rôle technique |
+| Package / Directory | Dependencies | Technical Role |
 | :--- | :--- | :--- |
-| `ogy_core/` | Stdlib uniquement | Configuration (`config.py`), isolation profil & backup/restore `.gemini` (`profile.py`), persistance SQLite WAL & détection `W1`–`W8` (`storage.py`), ingestion transcripts/DBs `agy` (`ingest.py`), routage 2-étages (`router.py`), santé du contexte & handoff (`context_health.py`), tarification versionnée (`pricing.py`), coupe-feu & compression shell (`firebreaks.py`). |
-| `ogy_cli/` | Stdlib uniquement | Point d'entrée `ogy` (`main.py`), wrapper `ogy run` (`wrapper.py`), assistant `init`/`uninstall`/`doctor`/`audit` (`init_audit.py`), gestion typée de `config.toml` (`config_cmd.py`), rendu ROI `stats`/`waste` (`stats_render.py`). |
-| `ogy_hooks/` | Stdlib uniquement | Point d'entrée `ogy-hook` (`cli.py`) dispatchant `session-start`, `pre-tool`, `post-tool`, `pre-invocation`, `post-invocation`, `stop` et `statusline`. |
-| `ogy_statusline/` | Stdlib uniquement | Rendu HUD 1 ligne ANSI adaptatif à la largeur du terminal, debouncing SQLite 10 s et respect `NO_COLOR` (`render.py`). |
-| `ogy_mcp/` | `[mcp]` (`mcp>=2,<3`) | Serveur MCP stdio minimal (`server.py`, 3 outils) sans aucune écriture sur `stdout`. |
-| `ogy_subagents/` | `[subagents]` (`mcp`, `google-genai[aiohttp]`, `keyring`) | Serveur MCP dédié `ogy-subagents` (`server.py`), client async `google-genai` (`gemini_client.py`), routeur de résilience 429/402 (`router.py`), cascade de secrets & redaction (`secrets.py`), outils read-only whitelistés (`tools_readonly.py`), runner isolé `git worktree` (`worktree.py`). |
-| `ogy_frontends/acp_tui/` | `[tui]` (`textual>=8.0`, `agent-client-protocol>=1.0`) | Client ACP v1 JSON-RPC 2.0 (`client.py`), orchestrateur V2 (`orchestrator.py`), i18n FR/EN (`i18n.py`), application Textual modulaire (`app.py`, `screens/`, `widgets/`, `state/`, `styles.tcss`). |
-| `templates/` | Inclus dans le wheel (`ogy_cli/templates`) | Règle d'hygiène `ogy-hygiene.md` (< 200 tokens) et skill `ogy-frugal-engineering/SKILL.md`. |
+| `ogy_core/` | Stdlib only | Configuration (`config.py`), profile isolation & `.gemini` backup/restore (`profile.py`), SQLite WAL persistence & `W1`–`W8` detection (`storage.py`), `agy` transcript/DB ingestion (`ingest.py`), 2-stage routing (`router.py`), context health & handoff (`context_health.py`), versioned pricing (`pricing.py`), firebreaks & shell compression (`firebreaks.py`). |
+| `ogy_cli/` | Stdlib only | `ogy` entry point (`main.py`), `ogy run` wrapper (`wrapper.py`), `init`/`uninstall`/`doctor`/`audit` wizard (`init_audit.py`), typed `config.toml` management (`config_cmd.py`), ROI `stats`/`waste` rendering (`stats_render.py`). |
+| `ogy_hooks/` | Stdlib only | `ogy-hook` entry point (`cli.py`) dispatching `session-start`, `pre-tool`, `post-tool`, `pre-invocation`, `post-invocation`, `stop`, and `statusline`. |
+| `ogy_statusline/` | Stdlib only | Terminal-width-adaptive 1-line ANSI HUD renderer, 10s SQLite debouncing, and `NO_COLOR` compliance (`render.py`). |
+| `ogy_mcp/` | `[mcp]` (`mcp>=2,<3`) | Minimal stdio MCP server (`server.py`, 3 tools) with zero `stdout` writes. |
+| `ogy_subagents/` | `[subagents]` (`mcp`, `google-genai[aiohttp]`, `keyring`) | Dedicated `ogy-subagents` MCP server (`server.py`), async `google-genai` client (`gemini_client.py`), 429/402 resilience router (`router.py`), secrets cascade & redaction (`secrets.py`), whitelisted read-only tools (`tools_readonly.py`), isolated `git worktree` runner (`worktree.py`). |
+| `ogy_frontends/acp_tui/` | `[tui]` (`textual>=8.0`, `agent-client-protocol>=1.0`) | ACP v1 JSON-RPC 2.0 client (`client.py`), V2 orchestrator (`orchestrator.py`), FR/EN i18n (`i18n.py`), modular Textual app (`app.py`, `screens/`, `widgets/`, `state/`, `styles.tcss`). |
+| `templates/` | Bundled in wheel (`ogy_cli/templates`) | Hygiene rule `ogy-hygiene.md` (< 200 tokens) and skill `ogy-frugal-engineering/SKILL.md`. |
 
-### Points d'entrée & Extras (`pyproject.toml`)
+### Entry Points & Extras (`pyproject.toml`)
 
 ```toml
 [project.scripts]
@@ -121,76 +121,76 @@ ogy-mcp = "ogy_mcp.server:main"
 ogy-subagents = "ogy_subagents.server:main"
 ```
 
-* `dependencies = []` — Installation de base `.` 100 % stdlib.
-* Extras optionnels : `[mcp]`, `[tui]`, `[subagents]`, `[all]` (union des trois), `[dev]` (`pytest>=8.0`, `pytest-asyncio`).
+* `dependencies = []` — Base `.` install is 100% stdlib.
+* Optional extras: `[mcp]`, `[tui]`, `[subagents]`, `[all]` (union of all three), `[dev]` (`pytest>=8.0`, `pytest-asyncio`).
 
 ---
 
-## 3. Persistance SQLite WAL & Modèle de données
+## 3. SQLite WAL Persistence & Data Model
 
-Toute la télémétrie locale est centralisée dans `~/.local/share/optigravity/ogy.db` (surchargeable via `OGY_DB_PATH` ou `[general].db_path`), gérée par `ogy_core/storage.py`.
+All local telemetry is centralized in `~/.local/share/optigravity/ogy.db` (overridable via `OGY_DB_PATH` or `[general].db_path`), managed by `ogy_core/storage.py`.
 
-### Stratégie de concurrence & PRAGMAs
+### Concurrency Strategy & PRAGMAs
 
-* **Mode WAL & initialisation** (`DB_INIT_PRAGMAS`, appliqués lors des migrations) :
+* **WAL Mode & Initialization** (`DB_INIT_PRAGMAS`, applied during migrations):
   * `PRAGMA journal_mode = WAL;`
   * `PRAGMA auto_vacuum = INCREMENTAL;`
-  * `PRAGMA journal_size_limit = 67108864;` (64 Mio)
-* **PRAGMAs par connexion** (`CONN_PRAGMAS`, `isolation_level=None`) :
+  * `PRAGMA journal_size_limit = 67108864;` (64 MiB)
+* **Per-Connection PRAGMAs** (`CONN_PRAGMAS`, `isolation_level=None`):
   * `PRAGMA synchronous = NORMAL;`
   * `PRAGMA foreign_keys = ON;`
   * `PRAGMA busy_timeout = 5000;`
   * `PRAGMA temp_store = MEMORY;`
-* **Migrations versionnées** : contrôlées par `PRAGMA user_version` (`CURRENT_SCHEMA_VERSION = 2`) afin d'éviter tout verrou DDL sur les connexions courantes.
-* **Lectures sans contention (`connect_readonly`)** : `stats`, `waste`, le worker TUI et le fallback `statusline` ouvrent la base via URI `file://...?mode=ro` + `PRAGMA query_only = ON;` (zéro verrou d'écriture).
-* **Maintenance `stop`** : `run_stop_maintenance()` exécute un checkpoint WAL et un vacuum incrémental en fin de session.
+* **Versioned Migrations**: gated by `PRAGMA user_version` (`CURRENT_SCHEMA_VERSION = 2`) to avoid DDL locks on routine connections.
+* **Lock-Free Reads (`connect_readonly`)**: `stats`, `waste`, the TUI telemetry worker, and the `statusline` fallback open the DB via URI `file://...?mode=ro` + `PRAGMA query_only = ON;` (zero write locks).
+* **`stop` Maintenance**: `run_stop_maintenance()` runs a WAL checkpoint and incremental vacuum at session end.
 
-### Schéma relationnel (9 tables + 3 vues)
+### Relational Schema (9 Tables + 3 Views)
 
-| Table | Clé primaire / Contraintes d'idempotence | Rôle |
+| Table | Primary Key / Idempotency Constraints | Role |
 | :--- | :--- | :--- |
-| `tasks` | `task_id` (PK) | Tâches logiques (`repo_root`, `git_branch`, `category`, `outcome`, `verifier_passed`, `rollback_count`). |
-| `sessions` | `session_id` (PK), FK `parent_session_id`, `task_id` | Arbre de sessions (`root_session_id`, `nesting_depth`), curseurs d'ingestion incrémentale (`transcript_byte_offset`, `last_ingested_step`), coûts agrégés. |
-| `turns` | `turn_id` (PK), `UNIQUE(session_id, step_index)`, index unique partiel `idx_turns_response_id` | Métriques par tour : `input_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `output_tokens`, `thinking_tokens`, `context_window_used`, `exceeds_200k`, `gap_since_prev_turn_s`, `estimated_cost_usd`. |
-| `tool_calls` | `tool_call_id` (PK), `UNIQUE(session_id, step_index, tool_name, args_hash)` | Appels d'outils dédupliqués via `canonical_args_hash()` (SHA-256 JSON trié compact), volumes `raw_output_bytes` vs `context_output_bytes`, `hook_action`, `firebreak_rule`, `is_error`. |
-| `routing_decisions` | `decision_id` (PK), FK `session_id`, `task_id`, `escalated_from_id` | Historique des décisions Stage 1 / Stage 2 (`features_json`, `chosen_model`, `chosen_effort`, `propensity`, `predicted_score`, `actual_reward`). |
-| `quota_snapshots` | `snapshot_id` (PK), index `(bucket_id, captured_at)` | Instantanés des quotas OAuth (`remaining_fraction`, `reset_time`, `reset_in_seconds`, `plan_tier`). |
-| `hook_events` | `event_id` (PK) | Audit des déclenchements hooks (`hook_type`, `action_taken`, `rule_name`, `tokens_saved_est`, `hook_latency_ms`). |
-| `prompt_history` | `history_id` (PK), index `(repo_root, created_at DESC)` | Historique persistant des prompts du compositeur TUI, filtré par dépôt. |
-| `subagent_runs` | `run_id` (PK), FK `parent_session_id` | Suivi temps réel des sous-agents MCP (`tool_name`, `model_id`, `tier`, `step`/`max_steps`, `status`, `input/output/thought_tokens`, `cost_usd`). |
+| `tasks` | `task_id` (PK) | Logical tasks (`repo_root`, `git_branch`, `category`, `outcome`, `verifier_passed`, `rollback_count`). |
+| `sessions` | `session_id` (PK), FK `parent_session_id`, `task_id` | Session tree (`root_session_id`, `nesting_depth`), incremental ingestion cursors (`transcript_byte_offset`, `last_ingested_step`), aggregated costs. |
+| `turns` | `turn_id` (PK), `UNIQUE(session_id, step_index)`, partial unique index `idx_turns_response_id` | Per-turn metrics: `input_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `output_tokens`, `thinking_tokens`, `context_window_used`, `exceeds_200k`, `gap_since_prev_turn_s`, `estimated_cost_usd`. |
+| `tool_calls` | `tool_call_id` (PK), `UNIQUE(session_id, step_index, tool_name, args_hash)` | Tool invocations deduplicated via `canonical_args_hash()` (compact sorted JSON SHA-256), `raw_output_bytes` vs `context_output_bytes`, `hook_action`, `firebreak_rule`, `is_error`. |
+| `routing_decisions` | `decision_id` (PK), FK `session_id`, `task_id`, `escalated_from_id` | Stage 1 / Stage 2 routing history (`features_json`, `chosen_model`, `chosen_effort`, `propensity`, `predicted_score`, `actual_reward`). |
+| `quota_snapshots` | `snapshot_id` (PK), index `(bucket_id, captured_at)` | OAuth quota snapshots (`remaining_fraction`, `reset_time`, `reset_in_seconds`, `plan_tier`). |
+| `hook_events` | `event_id` (PK) | Audit log of hook invocations (`hook_type`, `action_taken`, `rule_name`, `tokens_saved_est`, `hook_latency_ms`). |
+| `prompt_history` | `history_id` (PK), index `(repo_root, created_at DESC)` | Persistent TUI composer prompt history, scoped by repository. |
+| `subagent_runs` | `run_id` (PK), FK `parent_session_id` | Real-time tracking of MCP subagents (`tool_name`, `model_id`, `tier`, `step`/`max_steps`, `status`, `input/output/thought_tokens`, `cost_usd`). |
 
-**Vues SQL analytiques :**
-* `v_session_kpis` : agrégation par session (`turn_count`, totaux tokens, `cache_hit_ratio`, `peak_context_tokens`, `turns_cost_usd`).
-* `v_task_rollup_with_subagents` : CTE récursive (`WITH RECURSIVE session_tree`, `depth < 10`) consolidant les coûts et tokens d'une session racine et de ses sessions enfants.
-* `v_routing_performance` : taux de succès, récompense moyenne, coût moyen et nombre moyen de tours par `(category, model_id, effort_level)` pour alimenter le bandit Stage 2.
+**Analytical SQL Views:**
+* `v_session_kpis`: per-session aggregation (`turn_count`, token totals, `cache_hit_ratio`, `peak_context_tokens`, `turns_cost_usd`).
+* `v_task_rollup_with_subagents`: recursive CTE (`WITH RECURSIVE session_tree`, `depth < 10`) rolling up costs and tokens across a root session and its child sessions.
+* `v_routing_performance`: success rate, mean reward, mean cost, and mean turn count by `(category, model_id, effort_level)` feeding the Stage 2 bandit.
 
-### Corrélation atomique `ogy run` → `session-start`
+### Atomic Correlation `ogy run` → `session-start`
 
-Pour relier une décision de routage prise avant le lancement de `agy` au `conversationId` attribué ensuite par `agy`, `write_pending_task()` écrit un fichier JSON éphémère (TTL `30 s`) dans `~/.cache/optigravity/pending_tasks/<sha256(normcase(cwd))[:16]>.json` via renommage atomique (`tmp.replace(target)`). À l'événement `session-start`, `consume_pending_task()` revendique le fichier atomiquement (`target.replace(claimed)`), lit la décision, enregistre la ligne dans `routing_decisions` puis supprime le fichier temporaire.
+To correlate a routing decision made before `agy` launches with the `conversationId` later assigned by `agy`, `write_pending_task()` writes an ephemeral JSON file (TTL `30 s`) to `~/.cache/optigravity/pending_tasks/<sha256(normcase(cwd))[:16]>.json` via atomic rename (`tmp.replace(target)`). On `session-start`, `consume_pending_task()` atomically claims the file (`target.replace(claimed)`), reads the decision, inserts the row into `routing_decisions`, and deletes the temporary file.
 
-### Détection automatisée du gaspillage (`W1`–`W8`)
+### Automated Waste Detection (`W1`–`W8`)
 
-`detect_waste()` exécute 8 requêtes analytiques ciblées :
-* `W1` : faible taux de cache hit sur sessions chaudes ;
-* `W2` : boucles de retries / appels en erreur répétés ;
-* `W3` : sorties d'outils obèses (candidates `ogy wrap`) ;
-* `W4` : sur-effort de raisonnement (`thinking_tokens` disproportionnés) ;
-* `W5` : risque de *context rot* (`peak_context_tokens` élevé / longs tours) ;
-* `W6` : lectures redondantes du même fichier ;
-* `W7` : surcharge de schémas MCP (`eager: true` ou outils UI-only) ;
-* `W8` : dérive de coût ou d'étapes des sous-agents.
+`detect_waste()` runs 8 targeted analytical queries:
+* `W1`: low cache hit rate on warm sessions;
+* `W2`: retry loops / repeated failing tool calls;
+* `W3`: oversized tool outputs (`ogy wrap` candidates);
+* `W4`: reasoning over-effort (disproportionate `thinking_tokens`);
+* `W5`: context rot risk (high `peak_context_tokens` / long sessions);
+* `W6`: duplicate reads of the same file;
+* `W7`: MCP schema bloat (`eager: true` or UI-only tools);
+* `W8`: subagent cost or step drift.
 
 ---
 
-## 4. Routage 2-Étages, Santé du Contexte & Tarification
+## 4. 2-Stage Routing, Context Health & Pricing
 
-### Routage 2-Étages (`ogy_core/router.py`)
+### 2-Stage Routing (`ogy_core/router.py`)
 
-Optigravity applique la **règle de stickiness** : le modèle et l'effort sont fixés au lancement de la session (ou à la frontière d'un sous-agent) et ne sont jamais modifiés à la volée sans action explicite, afin de préserver le préfixe de prompt cache.
+Optigravity enforces a **stickiness rule**: model and effort are chosen at session launch (or subagent boundary) and are never mutated mid-session without explicit user action, preserving the prompt cache prefix.
 
-* **Stage 1 — Heuristique déterministe (`< 5 ms`)** :
-  * `extract_features()` extrait 8 signaux normalisés (`prompt_len`, `at_mentions`, `repo_file_count`, `has_test_runner`, `is_multifile`, `has_stacktrace`, `is_arch_sec`, `quota_low` si `remaining_fraction < 0.15`).
-  * `classify_stage1()` mappe vers 7 catégories :
+* **Stage 1 — Deterministic Heuristic (`< 5 ms`)**:
+  * `extract_features()` extracts 8 normalized signals (`prompt_len`, `at_mentions`, `repo_file_count`, `has_test_runner`, `is_multifile`, `has_stacktrace`, `is_arch_sec`, `quota_low` when `remaining_fraction < 0.15`).
+  * `classify_stage1()` maps to 7 categories:
     * `trivial_edit` → `(gemini-4-hydrogen, low, accept-edits)`
     * `lookup_qa` → `(gemini-4-hydrogen, low, plan)`
     * `routine_code` → `(gemini-4-hydrogen, medium, auto)`
@@ -198,160 +198,160 @@ Optigravity applique la **règle de stickiness** : le modèle et l'effort sont f
     * `bugfix_complex` → `(gemini-4-neon, high, auto)`
     * `refactor_multifile` → `(gemini-4-neon, medium, auto)`
     * `architecture_security` → `(gemini-4-neon, high, plan)`
-  * Si `quota_low` est vrai, l'effort est abaissé d'un cran dans `("low", "medium", "high", "xhigh")` (sauf pour `architecture_security`).
-* **Stage 2 — Bandit contextuel UCB1 sur SQLite** :
-  * S'active uniquement à partir de `>= 15` tâches qualifiées dans une catégorie (`eta = 0.92`), en excluant tout bras dont le taux de succès est `< 80 %`.
-  * Évaluable hors ligne en mode shadow via `ogy router-eval`.
+  * When `quota_low` is true, effort steps down by one notch in `("low", "medium", "high", "xhigh")` (except for `architecture_security`).
+* **Stage 2 — SQLite UCB1 Contextual Bandit**:
+  * Activates only after `>= 15` qualified tasks in a category (`eta = 0.92`), excluding any arm with `< 80%` success rate.
+  * Evaluable offline in shadow mode via `ogy router-eval`.
 
-### Santé du contexte & seuil $K^*$ (`ogy_core/context_health.py`)
+### Context Health & $K^*$ Threshold (`ogy_core/context_health.py`)
 
-`assess_context_health()` classe la session en trois zones et recommande l'action la plus économique :
+`assess_context_health()` classifies the session into three zones and recommends the most cost-effective action:
 
-| Zone | Conditions de déclenchement | Action recommandée |
+| Zone | Trigger Conditions | Recommended Action |
 | :--- | :--- | :--- |
-| **Green** | `< 60K` tokens, `< 15` tours, cache hit `>= 60 %` | `keep_warm` |
-| **Amber** | `60K–100K` tokens, ou `15–25` tours, ou cache `< 60 %` (`>= 3` tours) | `frugal_btw` |
-| **Red** | `>= 100K` tokens, ou `exceeds_200k`, ou `idle_gap > 180s` au-dessus de `60K`, ou `>= 2` échecs consécutifs | `rewind` (si `>= 2` échecs), `compact` (si tours restants `>= K*`, `<= 200K` et `idle_gap <= 300s`), sinon `clear_handoff` |
+| **Green** | `< 60K` tokens, `< 15` turns, cache hit `>= 60%` | `keep_warm` |
+| **Amber** | `60K–100K` tokens, or `15–25` turns, or cache `< 60%` (`>= 3` turns) | `frugal_btw` |
+| **Red** | `>= 100K` tokens, or `exceeds_200k`, or `idle_gap > 180s` above `60K`, or `>= 2` consecutive failures | `rewind` (if `>= 2` failures), `compact` (if remaining turns `>= K*`, `<= 200K`, and `idle_gap <= 300s`), otherwise `clear_handoff` |
 
-* **Seuil de rentabilité $K^*$ (`k_star_threshold`)** : `5` tours restants pour Gemini, `9` tours pour Claude (en dessous, `/clear` + `.ogy/handoff.md` est `> 50 %` moins cher que `/compact`).
-* **Alertes proactives** : pré-éviction cache Gemini à `idle_gap >= 150s`, cache froid à `>= 300s`, falaise tarifaire Haiku `> 90K` (5× à `100K`) et Gemini `> 180K` (2× à `200K`).
-* **Handoff normalisé (`write_handoff`)** : écrit `.ogy/handoff.md` (`<= 30` lignes structurées : Goal, Modified files, Checks, Negative constraints, Next step), injecté une seule fois via `injectSteps` au `session-start` suivant puis archivé en `handoff.archived.md`.
+* **Break-Even Threshold $K^*$ (`k_star_threshold`)**: `5` remaining turns for Gemini, `9` turns for Claude (below this threshold, `/clear` + `.ogy/handoff.md` is `> 50%` cheaper than `/compact`).
+* **Proactive Alerts**: Gemini cache pre-eviction at `idle_gap >= 150s`, cold cache at `>= 300s`, Haiku pricing cliff `> 90K` (5× at `100K`), and Gemini cliff `> 180K` (2× at `200K`).
+* **Normalized Handoff (`write_handoff`)**: writes `.ogy/handoff.md` (`<= 30` structured lines: Goal, Modified files, Checks, Negative constraints, Next step), injected once via `injectSteps` on the next `session-start` and archived as `handoff.archived.md`.
 
-### Catalogue tarifaire versionné (`ogy_core/pricing.py`)
+### Versioned Pricing Catalogue (`ogy_core/pricing.py`)
 
-* Normalisation des alias via `normalize_model_id()` (Gemini 4 `Hydrogen`/`Neon`/`Carbon`/`Argon`, Claude 5.5 `Opus`/`Sonnet`/`Haiku`, Gemini API `3.5-flash-lite`, `3.1-flash-lite`, `3.6/3.8-flash`, `3.1-pro`).
-* **Dates de bascule tarifaire intégrées** :
-  * `CARBON_PRICE_SWITCH_DATE = 2026-12-01` (`$2/$10` → `$4/$20` pour Carbon/Argon).
-  * `GEMINI_FLASH_PRICE_DOUBLE_DATE = 2027-01-01` (`$0.75/$3.75` → `$1.50/$7.50` pour `3.6/3.8-flash`).
-* **Facturation exacte** : prise en compte des multiplicateurs de cache (`0.05` standard / `0.10` enterprise pour Gemini ; `0.05` read / `1.25` ou `2.0` write 1h pour Claude), falaises long-contexte, `thoughts_token_count`, et séparation stricte des sources (`oauth_quota`, `gemini_api_free`, `gemini_api_tier1`).
-
----
-
-## 5. Hooks Fail-Open, Coupe-Feu & Compression Shell
-
-### Dispatcher `ogy-hook` (`ogy_hooks/cli.py`)
-
-Invoqué par `agy` avec le payload JSON sur `stdin`, il répond sur `stdout` et mesure sa propre latence dans `hook_events` (cible `< 25 ms`) :
-* `session-start` : crée la session, consomme `pending_tasks`, injecte `.ogy/handoff.md` via `injectSteps` puis l'archive.
-* `pre-tool` : ouvre une connexion `connect_readonly` (`timeout=0.5s`) et évalue `evaluate_pre_tool_firebreaks()`. Retourne toujours `{"decision": "allow"}` en pass-through (contrat validé sur `agy 1.5.16`), ou `{"decision": "deny", "reason": ...}` / `{"decision": "allow", "overwrite": {"CommandLine": ...}}`.
-* `post-tool` : normalise `camelCase`/`snake_case`, enregistre `tool_calls` (avec `args_hash`).
-* `pre-invocation` / `post-invocation` : ingestion incrémentale des transcripts (`ingest_transcript_incremental`), enrichissement lecture seule depuis les bases `conversations/<id>.db` de `agy` (`enrich_from_agy_dbs`), contrôle de `budget.hard_cap_usd`.
-* `stop` : calcul de la récompense (`compute_reward`), clôture session et `run_stop_maintenance()`.
-
-### Coupe-feu déterministes (`ogy_core/firebreaks.py`)
-
-1. **Anti-loop** : refuse un appel après `>= loop_threshold` (`3` par défaut) échecs consécutifs sur le même `(session_id, tool_name, args_hash)`.
-2. **Lectures de fichiers adaptatives** :
-   * Blocage des lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `uv.lock`, `poetry.lock`, `composer.lock`, `Gemfile.lock`) sans plage de lignes bornée.
-   * Seuils typés par extension sur les lectures non bornées : **48 Ko** docs/config (`.md`, `.toml`, `.yaml`, `.txt`…), **24 Ko** code source, **8 Ko** logs/données (`.log`, `.json`, `.jsonl`, `.csv`, `.sql`, `.map`…). Le message de refus indique le nombre exact de lignes et les paramètres de plage adaptés à l'outil.
-3. **Tokenizer lexical shell & réécriture `bounded-aware`** :
-   * Découpe les commandes composées (`&&`, `||`, `;`, `|`) en préservant les guillemets, laisse passer les redirections, sous-shells, blocs PowerShell et commandes déjà bornées (`pytest -q/--tb=short`, `git log -n/--oneline`, `git diff --stat`, `git status -s`, pipes vers `head`/`tail`/`rg`/`jq`/`Select-Object`…), ainsi que les commandes mutantes (`git commit/push/reset`, `rm`, `del`).
-   * Respecte le bypass explicite (`OGY_NO_WRAP=1`, `ogy raw --`).
-   * Si `hooks.overwrite_verified_ok = true`, réécrit silencieusement les segments verbeux via `overwrite.CommandLine` en `ogy wrap -- <segment>`.
-
-### Compression shell (`ogy wrap` & `ogy recall`)
-
-* **Drainage dual-thread sans deadlock** : lance le sous-processus et draine `stdout` et `stderr` en parallèle dans deux threads daemon (évite les deadlocks de buffers OS sur Windows et POSIX) tout en préservant le code de sortie exact.
-* **Pass-through transparent** : si la sortie fait `< 40` lignes (`SMALL_OUTPUT_MAX_LINES`) et `< 3 072` octets (`SMALL_OUTPUT_MAX_BYTES`), elle est renvoyée telle quelle.
-* **Stash & GC LRU** : au-delà, écrit `stdout.log`, `stderr.log` et `meta.json` sous `~/.cache/optigravity/stash/<hash>/` et retourne un résumé compact avec le préfixe de hash. Un GC opportuniste (toutes les `3600 s`) purge les entrées au-delà de `7 jours` ou `200 Mo`.
-* **UX TTY** : spinner 1 ligne sur `stderr` uniquement si `stderr.isatty()`, zéro séquence ANSI en mode non-TTY.
+* Alias normalization via `normalize_model_id()` (Gemini 4 `Hydrogen`/`Neon`/`Carbon`/`Argon`, Claude 5.5 `Opus`/`Sonnet`/`Haiku`, Gemini API `3.5-flash-lite`, `3.1-flash-lite`, `3.6/3.8-flash`, `3.1-pro`).
+* **Built-In Pricing Switch Dates**:
+  * `CARBON_PRICE_SWITCH_DATE = 2026-12-01` (`$2/$10` → `$4/$20` for Carbon/Argon).
+  * `GEMINI_FLASH_PRICE_DOUBLE_DATE = 2027-01-01` (`$0.75/$3.75` → `$1.50/$7.50` for `3.6/3.8-flash`).
+* **Exact Billing**: accounts for cache multipliers (`0.05` standard / `0.10` enterprise for Gemini; `0.05` read / `1.25` or `2.0` 1h write for Claude), long-context cliffs, `thoughts_token_count`, and strict `billing_source` separation (`oauth_quota`, `gemini_api_free`, `gemini_api_tier1`).
 
 ---
 
-## 6. Frontend Interactif ACP TUI (`ogy tui`)
+## 5. Fail-Open Hooks, Firebreaks & Shell Compression
 
-Implémenté dans `ogy_frontends/acp_tui/` sur **Textual 8+** et **`agent-client-protocol>=1.0`**.
+### `ogy-hook` Dispatcher (`ogy_hooks/cli.py`)
 
-### Client ACP v1 (`client.py`)
+Invoked by `agy` with the JSON payload on `stdin`, responds on `stdout`, and records its own latency in `hook_events` (`< 25 ms` target):
+* `session-start`: registers the session, consumes `pending_tasks`, injects `.ogy/handoff.md` via `injectSteps`, and archives it.
+* `pre-tool`: opens a `connect_readonly` connection (`timeout=0.5s`) and runs `evaluate_pre_tool_firebreaks()`. Always returns `{"decision": "allow"}` on pass-through (verified on `agy 1.5.16`), or `{"decision": "deny", "reason": ...}` / `{"decision": "allow", "overwrite": {"CommandLine": ...}}`.
+* `post-tool`: normalizes `camelCase`/`snake_case` and records `tool_calls` (with `args_hash`).
+* `pre-invocation` / `post-invocation`: incremental transcript ingestion (`ingest_transcript_incremental`), read-only enrichment from `agy`'s `conversations/<id>.db` (`enrich_from_agy_dbs`), and `budget.hard_cap_usd` enforcement.
+* `stop`: reward calculation (`compute_reward`), session closure, and `run_stop_maintenance()`.
 
-* Pilote `agy acp` en JSON-RPC 2.0 sur `stdio` avec gestion du cycle de vie via `AsyncExitStack` (`process_per_session=True` par défaut).
-* Valide strictement les modes (`VALID_ACP_MODES = {"default", "accept-edits", "auto", "plan"}`, `BANNED_ACP_MODES = {"yolo"}`).
-* Normalise le flux protocole en dataclasses figées (`slots=True`) : `UserMessageEvent`, `AgentMessageEvent`, `AgentThoughtEvent`, `ToolCallEvent`, `UsageEvent`, `ConfigUpdateEvent`, `PermissionRequestEvent`.
-* Ingère chaque tour ACP dans `ogy.db` via `ingest_acp_turn()`.
+### Deterministic Firebreaks (`ogy_core/firebreaks.py`)
 
-### Architecture UI & Concurrence
+1. **Anti-Loop**: denies a call after `>= loop_threshold` (`3` by default) consecutive failures on the same `(session_id, tool_name, args_hash)`.
+2. **Adaptive File Reads**:
+   * Blocks lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `uv.lock`, `poetry.lock`, `composer.lock`, `Gemfile.lock`) unless bounded by a line range.
+   * Extension-typed thresholds for unbounded reads: **48 KB** docs/config (`.md`, `.toml`, `.yaml`, `.txt`…), **24 KB** source code, **8 KB** logs/data (`.log`, `.json`, `.jsonl`, `.csv`, `.sql`, `.map`…). The denial message reports the exact file line count and tool-specific range parameters.
+3. **Lexical Shell Tokenizer & `bounded-aware` Rewrite**:
+   * Splits compound commands (`&&`, `||`, `;`, `|`) while preserving quotes; passes through redirections, subshells, PowerShell blocks, already-bounded commands (`pytest -q/--tb=short`, `git log -n/--oneline`, `git diff --stat`, `git status -s`, pipes into `head`/`tail`/`rg`/`jq`/`Select-Object`…), and mutating commands (`git commit/push/reset`, `rm`, `del`).
+   * Honors explicit bypasses (`OGY_NO_WRAP=1`, `ogy raw --`).
+   * When `hooks.overwrite_verified_ok = true`, silently rewrites verbose segments via `overwrite.CommandLine` to `ogy wrap -- <segment>`.
 
-| Module | Rôle |
+### Shell Compression (`ogy wrap` & `ogy recall`)
+
+* **Deadlock-Free Dual-Thread Drain**: spawns the subprocess and drains `stdout` and `stderr` concurrently on two daemon threads (preventing OS pipe buffer deadlocks on Windows and POSIX) while preserving the exact exit code.
+* **Transparent Pass-Through**: if output is `< 40` lines (`SMALL_OUTPUT_MAX_LINES`) and `< 3,072` bytes (`SMALL_OUTPUT_MAX_BYTES`), it is emitted verbatim.
+* **Stash & LRU GC**: beyond those thresholds, writes `stdout.log`, `stderr.log`, and `meta.json` under `~/.cache/optigravity/stash/<hash>/` and returns a compact summary with the hash prefix. Opportunistic GC (every `3600 s`) purges entries exceeding `7 days` or `200 MB`.
+* **TTY UX**: renders a 1-line spinner on `stderr` only when `stderr.isatty()`, emitting zero ANSI sequences in non-TTY mode.
+
+---
+
+## 6. Interactive ACP TUI Frontend (`ogy tui`)
+
+Implemented in `ogy_frontends/acp_tui/` on **Textual 8+** and **`agent-client-protocol>=1.0`**.
+
+### ACP v1 Client (`client.py`)
+
+* Drives `agy acp` over JSON-RPC 2.0 on `stdio` with lifecycle management via `AsyncExitStack` (`process_per_session=True` by default).
+* Strictly validates modes (`VALID_ACP_MODES = {"default", "accept-edits", "auto", "plan"}`, `BANNED_ACP_MODES = {"yolo"}`).
+* Normalizes protocol events into frozen dataclasses (`slots=True`): `UserMessageEvent`, `AgentMessageEvent`, `AgentThoughtEvent`, `ToolCallEvent`, `UsageEvent`, `ConfigUpdateEvent`, `PermissionRequestEvent`.
+* Ingests every ACP turn into `ogy.db` via `ingest_acp_turn()`.
+
+### UI Architecture & Concurrency
+
+| Module | Role |
 | :--- | :--- |
-| `app.py` | Cycle de vie Textual, raccourcis globaux (`Ctrl+P/O/B/N/S/C/Q`, `F1`), dispatch des commandes slash (`/model`, `/effort`, `/mode`, `/btw`, `/lang`, `/rotate`, `/handoff`, `/resume`), worker SQLite lecture seule `@work(thread=True, exclusive=True)`. |
-| `screens/main.py` & `screens/modals.py` | Layout principal (`ContentSwitcher` isolant strictement un `SessionTranscript` par `session_id`) et modales clavier-first (`PermissionModal`, `ElicitationModal` form/url, `SessionPickerModal`, `HandoffReviewModal`). |
-| `widgets/composer.py` | `PromptTextArea` (1–8 lignes auto-grow, `Ctrl+G` `$EDITOR`), historique SQLite (`↑`/`↓`, `Ctrl+R`), paste-collapse (`>= 8` lignes ou `>= 600` caractères), autocomplétion asynchrone `@file` (chemin relatif seul = 0 bloat). |
-| `widgets/transcript.py` | Streaming fluide via `Markdown.get_stream()` + `Widget.anchor()`/`release_anchor()` (pilule `↓ New messages · End` sans hijack du scroll), `ActivityGroup` repliable (`Ctrl+O`), `ToolCard` avec diffs unifiés colorés, `ThoughtBlock` auto-repliable. |
-| `widgets/telemetry.py` | Sidebar live : jauges Context/Cache/Quotas OAuth, arbre `parent → subagent` depuis `subagent_runs`, compteurs séparés OAuth vs Gemini API USD. |
-| `orchestrator.py` | `SessionOrchestrator` : calcul de *Switch Tax* (`switch_tax_usd`), détection `> 60K` (`CACHE_PRESERVE_THRESHOLD`), rotation Zone Rouge, garde-fou ToS Section 6 (`check_model_compatibility` redirigeant Claude 5.5 OAuth vers `ogy run`), émission d'`ActionProposal`. |
+| `app.py` | Textual lifecycle, global keybindings (`Ctrl+P/O/B/N/S/C/Q`, `F1`), slash command dispatch (`/model`, `/effort`, `/mode`, `/btw`, `/lang`, `/rotate`, `/handoff`, `/resume`), read-only SQLite worker `@work(thread=True, exclusive=True)`. |
+| `screens/main.py` & `screens/modals.py` | Main layout (`ContentSwitcher` strictly isolating one `SessionTranscript` per `session_id`) and keyboard-first modals (`PermissionModal`, `ElicitationModal` form/url, `SessionPickerModal`, `HandoffReviewModal`). |
+| `widgets/composer.py` | `PromptTextArea` (1–8 line auto-grow, `Ctrl+G` `$EDITOR`), SQLite prompt history (`↑`/`↓`, `Ctrl+R`), paste-collapse (`>= 8` lines or `>= 600` chars), async `@file` autocomplete (relative path only = 0 bloat). |
+| `widgets/transcript.py` | Smooth streaming via `Markdown.get_stream()` + `Widget.anchor()`/`release_anchor()` (`↓ New messages · End` pill without scroll hijacking), collapsible `ActivityGroup` (`Ctrl+O`), `ToolCard` with colored unified diffs, auto-collapsing `ThoughtBlock`. |
+| `widgets/telemetry.py` | Live sidebar: Context/Cache/OAuth Quota gauges, `parent → subagent` tree from `subagent_runs`, separate OAuth vs Gemini API USD counters. |
+| `orchestrator.py` | `SessionOrchestrator`: Switch Tax calculation (`switch_tax_usd`), `> 60K` detection (`CACHE_PRESERVE_THRESHOLD`), Red Zone rotation, ToS Section 6 guardrail (`check_model_compatibility` redirecting Claude 5.5 OAuth to `ogy run`), `ActionProposal` emission. |
 
 ---
 
-## 7. Serveurs MCP (`ogy-mcp` & `ogy-subagents`)
+## 7. MCP Servers (`ogy-mcp` & `ogy-subagents`)
 
-Les deux serveurs respectent strictement le contrat **MCP stdio** : aucun `print()` sur `stdout`, logs routés vers `sys.stderr`, et enregistrement `eager: false` dans `mcp_config.json` (tag `ogy-managed`).
+Both servers strictly adhere to the **MCP stdio** contract: no `print()` to `stdout`, all logs routed to `sys.stderr`, and `eager: false` registration in `mcp_config.json` (tagged `ogy-managed`).
 
-### Serveur minimal `ogy-mcp` (`ogy_mcp/server.py`)
+### Minimal Server `ogy-mcp` (`ogy_mcp/server.py`)
 
-Expose 3 outils légers à schéma compact :
-1. `ogy_session_budget(session_id?)` — lit `v_session_kpis` + dernier tour, exécute `assess_context_health()` et `detect_waste()`, retourne le top 3 waste et l'action conseillée.
-2. `ogy_recall(hash_prefix, start_line=1, end_line=100)` — lecture bornée dans `~/.cache/optigravity/stash/`.
-3. `ogy_write_handoff(...)` — génère `.ogy/handoff.md` (`<= 30` lignes).
+Exposes 3 lightweight tools with compact schemas:
+1. `ogy_session_budget(session_id?)` — reads `v_session_kpis` + latest turn, runs `assess_context_health()` and `detect_waste()`, returns the top 3 waste items and recommended action.
+2. `ogy_recall(hash_prefix, start_line=1, end_line=100)` — bounded read from `~/.cache/optigravity/stash/`.
+3. `ogy_write_handoff(...)` — generates `.ogy/handoff.md` (`<= 30` lines).
 
-### Serveur hybride `ogy-subagents` (`ogy_subagents/`)
+### Hybrid Server `ogy-subagents` (`ogy_subagents/`)
 
-Déporte les tâches volumineuses ou de recherche en lecture seule vers la Gemini API (`gemini-3.5-flash-lite` par défaut) sans toucher aux quotas OAuth de l'agent principal.
+Offloads high-volume or read-only research tasks to the Gemini API (`gemini-3.5-flash-lite` by default) without touching the main agent's OAuth quotas.
 
-* **Outils exposés (tous `readOnlyHint=True`)** :
-  * **Niveau 1 (stateless, 0 accès disque/shell)** : `ogy_summarize_stash(hash_prefix, focus_query?)`, `ogy_build_handoff(...)`.
-  * **Niveau 2 (boucle async `google-genai`, `max_steps=8`, `timeout=45s`)** : `ogy_research_repo(question, scope_paths?)`, `ogy_triage_failure(error_summary, stash_hash?)` utilisant uniquement les outils whitelistés de `tools_readonly.py` (`rg_search`, `read_slice`, `list_files`, `git_status`), `store=False`, `thinking_level` et préservation des *thought signatures*.
-* **Résilience 429 / 402 & Confidentialité (`router.py`)** :
-  * Sépare physiquement **Projet A (`free`)** et **Projet B (`tier1`)** selon `subagents.privacy_mode` (`tier1_only`, `free_first`, `disabled`).
-  * `classify_api_error()` distingue :
-    * `rpm_tpm` (429 transitoire) → backoff exponentiel jitter (`1.5 s`, `4.0 s`).
-    * `rpd` (429 quota journalier) → circuit-breaker jusqu'à minuit Pacific Time (`America/Los_Angeles`, fallback UTC-8 si `tzdata` absent) et bascule vers Tier 1 si `free_first` + `fallback_to_tier1`.
-    * `rpd_ambiguous` (429 sans marqueur clair) → cooldown `15 min`.
-    * `billing_402` → lève `SubagentBillingError` immédiatement (aucun retry).
-* **Double reporting de progression (`_DualProgressReporter`)** : émet `ctx.report_progress` / `ctx.info` (throttlé à `100 ms`) ET met à jour la table `subagent_runs` en SQLite WAL pour la sidebar `ogy tui`.
-* **Exécuteur isolé `git worktree` (`worktree.py`)** : opt-in strict (`subagents.worktree_enabled = false` par défaut), retourne un contrat JSON de diff pour revue humaine.
+* **Exposed Tools (all `readOnlyHint=True`)**:
+  * **Level 1 (stateless, 0 disk/shell access)**: `ogy_summarize_stash(hash_prefix, focus_query?)`, `ogy_build_handoff(...)`.
+  * **Level 2 (async `google-genai` loop, `max_steps=8`, `timeout=45s`)**: `ogy_research_repo(question, scope_paths?)`, `ogy_triage_failure(error_summary, stash_hash?)` using only whitelisted tools from `tools_readonly.py` (`rg_search`, `read_slice`, `list_files`, `git_status`), `store=False`, `thinking_level`, and preserved thought signatures.
+* **429 / 402 Resilience & Privacy (`router.py`)**:
+  * Physically separates **Project A (`free`)** and **Project B (`tier1`)** according to `subagents.privacy_mode` (`tier1_only`, `free_first`, `disabled`).
+  * `classify_api_error()` distinguishes:
+    * `rpm_tpm` (transient 429) → jittered exponential backoff (`1.5 s`, `4.0 s`).
+    * `rpd` (daily quota 429) → circuit-breaker until midnight Pacific Time (`America/Los_Angeles`, UTC-8 fallback if `tzdata` is missing) and failover to Tier 1 when `free_first` + `fallback_to_tier1`.
+    * `rpd_ambiguous` (429 without clear marker) → `15 min` cooldown.
+    * `billing_402` → raises `SubagentBillingError` immediately (no retry).
+* **Dual Progress Reporting (`_DualProgressReporter`)**: emits `ctx.report_progress` / `ctx.info` (throttled to `100 ms`) AND updates `subagent_runs` in SQLite WAL for the `ogy tui` sidebar.
+* **Isolated `git worktree` Runner (`worktree.py`)**: strict opt-in (`subagents.worktree_enabled = false` by default), returning a structured JSON diff contract for human review.
 
 ---
 
-## 8. Fichiers d'état, Secrets & Précédence de configuration
+## 8. State Files, Secrets & Configuration Precedence
 
-### Emplacements système
+### System Locations
 
-| Artefact | Chemin par défaut | Notes |
+| Artifact | Default Path | Notes |
 | :--- | :--- | :--- |
-| Configuration utilisateur | `~/.config/optigravity/config.toml` | Gérée via `ogy config show\|get\|set\|validate\|edit`. |
-| Secrets API (fallback) | `~/.config/optigravity/secrets.env` | Mode `0600` exigé sur POSIX (`check_secrets_file_permissions`). |
-| Base SQLite WAL | `~/.local/share/optigravity/ogy.db` | Surchargeable via `OGY_DB_PATH` ou `[general].db_path`. |
-| Stash `ogy wrap` | `~/.cache/optigravity/stash/<hash>/` | Contient `stdout.log`, `stderr.log`, `meta.json`. |
-| Corrélation `ogy run` | `~/.cache/optigravity/pending_tasks/` | Fichiers atomiques éphémères (TTL 30 s). |
-| État temporaire hooks | `<tempdir>/ogy-state/` | Debounce statusline et états éphémères. |
-| Intégration `agy` | `~/.gemini/{antigravity-cli,config}/` (mode `shared`) ou `~/.local/share/optigravity/gemini-profile/.gemini/` (mode `isolated`) | En mode `shared` : snapshots complets `~/.local/share/optigravity/backups/<YYYYMMDD-HHMMSS>/` + `*.ogy.bak` + garde-fou `OGY_ACTIVE=1`. En mode `isolated` : `~/.gemini/` 100 % vierge, OAuth lié (symlink/hardlink/jonction NTFS), `agy` lancé avec `--settings` + `USERPROFILE`/`HOME` isolés. |
-| Règles & skills `agy` | `.../config/rules/ogy-hygiene.md` & `.../config/skills/ogy-budget/SKILL.md` | Injecté par `ogy init` dans le profil actif. |
+| User configuration | `~/.config/optigravity/config.toml` | Managed via `ogy config show\|get\|set\|validate\|edit`. |
+| API secrets (fallback) | `~/.config/optigravity/secrets.env` | Mode `0600` required on POSIX (`check_secrets_file_permissions`). |
+| SQLite WAL database | `~/.local/share/optigravity/ogy.db` | Overridable via `OGY_DB_PATH` or `[general].db_path`. |
+| `ogy wrap` stash | `~/.cache/optigravity/stash/<hash>/` | Contains `stdout.log`, `stderr.log`, `meta.json`. |
+| `ogy run` correlation | `~/.cache/optigravity/pending_tasks/` | Ephemeral atomic files (TTL 30 s). |
+| Ephemeral hook state | `<tempdir>/ogy-state/` | Statusline debounce and transient state. |
+| `agy` integration | `~/.gemini/{antigravity-cli,config}/` (`shared` mode) or `~/.local/share/optigravity/gemini-profile/.gemini/` (`isolated` mode) | In `shared` mode: full snapshots `~/.local/share/optigravity/backups/<YYYYMMDD-HHMMSS>/` + `*.ogy.bak` + `OGY_ACTIVE=1` guard. In `isolated` mode: `~/.gemini/` stays 100% untouched, OAuth linked (symlink/hardlink/NTFS junction), `agy` launched with `--settings` + isolated `USERPROFILE`/`HOME`. |
+| `agy` rules & skills | `.../config/rules/ogy-hygiene.md` & `.../config/skills/ogy-budget/SKILL.md` | Installed by `ogy init` into the active profile. |
 
-### Précédence de configuration (`ogy_core/config.py`)
+### Configuration Precedence (`ogy_core/config.py`)
 
-`défauts OgyConfig` < `~/.config/optigravity/config.toml` < variables d'environnement (`OGY_DB_PATH`, `OGY_CONFIG_PATH`, `OGY_GEMINI_HOME`, `OGY_REAL_HOME`, `OGY_ACTIVE`, `OGY_LANGUAGE`, `OGY_NO_WRAP`).
+`OgyConfig defaults` < `~/.config/optigravity/config.toml` < environment variables (`OGY_DB_PATH`, `OGY_CONFIG_PATH`, `OGY_GEMINI_HOME`, `OGY_REAL_HOME`, `OGY_ACTIVE`, `OGY_LANGUAGE`, `OGY_NO_WRAP`).
 
-### Cascade de résolution des secrets (`ogy_subagents/secrets.py`)
+### Secrets Resolution Cascade (`ogy_subagents/secrets.py`)
 
-Pour chaque tier (`free` ou `tier1`), `resolve_api_key()` interroge dans l'ordre :
-1. **Variables d'environnement** : `OGY_GEMINI_API_KEY_FREE` / `OGY_GEMINI_API_KEY_TIER1`, puis fallback `GEMINI_API_KEY`.
-2. **Trousseau OS (`keyring`)** : service `optigravity` (`gemini_api_key_free` / `gemini_api_key_tier1` / `gemini_api_key`), tolérant aux environnements SSH/headless.
-3. **Fichier local** : `~/.config/optigravity/secrets.env` (refusé sur POSIX si permissions `& 0o077 != 0`).
+For each tier (`free` or `tier1`), `resolve_api_key()` queries in order:
+1. **Environment variables**: `OGY_GEMINI_API_KEY_FREE` / `OGY_GEMINI_API_KEY_TIER1`, then `GEMINI_API_KEY` fallback.
+2. **OS keyring (`keyring`)**: service `optigravity` (`gemini_api_key_free` / `gemini_api_key_tier1` / `gemini_api_key`), tolerant of SSH/headless environments.
+3. **Local file**: `~/.config/optigravity/secrets.env` (rejected on POSIX if permissions `& 0o077 != 0`).
 
-Aucune clé n'est jamais écrite dans `mcp_config.json` ni journalisée : `RedactingFilter` masque toute chaîne correspondant à `AIza[0-9A-Za-z_-]{35}` par `[REDACTED_GEMINI_KEY]`.
+No key is ever written to `mcp_config.json` or logged: `RedactingFilter` masks any string matching `AIza[0-9A-Za-z_-]{35}` as `[REDACTED_GEMINI_KEY]`.
 
 ---
 
-## 9. Développement, Tests & Conventions d'ingénierie
+## 9. Development, Testing & Engineering Conventions
 
-### Environnement de développement & Boucle locale (`Justfile`)
+### Development Environment & Local Loop (`Justfile`)
 
 ```bash
-# Avec uv (mode module recommandé)
+# With uv (module mode recommended)
 uv sync --all-extras
 uv run -m pytest -q --tb=short
 
-# Boucle locale incrémentale (Justfile cross-platform PowerShell + bash)
+# Incremental local loop (cross-platform PowerShell + bash Justfile)
 just dev          # uv run -m pytest --testmon -q --tb=short
 just tui          # uv run -m pytest tests/test_tui_app.py tests/test_acp_client.py -q --tb=short
 just v31          # uv run -m pytest -k "isolated or backup or restore or ogy_active" -q --tb=short
@@ -359,41 +359,41 @@ just snap-update  # uv run -m pytest -m snapshot --snapshot-update
 just all          # uv run -m pytest -n auto --timeout=30 -q --tb=short
 ```
 
-### Pyramide de tests automatisés V3.5 (4 étages)
+### Automated Test Pyramid V3.5 (4 Tiers)
 
-L'ensemble de la suite tourne sans jamais invoquer le binaire réel `agy` ni consommer de quotas OAuth. Le garde-fou global `tests/conftest.py` isole systématiquement `HOME`/`USERPROFILE`, `OGY_DB_PATH`, `OGY_CONFIG_PATH` et `OGY_GEMINI_HOME` dans `tmp_path` pour garantir zéro pollution du `~/.gemini/` hôte (y compris sous `pytest-xdist` et `mutmut`).
+The entire suite runs without ever invoking the real `agy` binary or consuming OAuth quotas. The global guard in `tests/conftest.py` isolates `HOME`/`USERPROFILE`, `OGY_DB_PATH`, `OGY_CONFIG_PATH`, and `OGY_GEMINI_HOME` inside `tmp_path`, guaranteeing zero pollution of the host `~/.gemini/` (including under `pytest-xdist` and `mutmut`).
 
-1. **Étage 1 — Noyau déterministe (`pytest` + `time-machine` + `inline-snapshot` + `syrupy`)** : SQLite WAL, bascules tarifaires `2026-12-01` / `2027-01-01`, reset RPD minuit PT (`America/Los_Angeles`), TTL `pending_tasks` 30 s, debounce statusline 10 s, purge LRU 7 j, snapshots CLI/HUD/V3.1.
-2. **Étage 2 — TUI Headless & Protocoles réels (`Pilot` + Fake ACP stdio + MCP stdio + Fake GenAI)** : `tests/fixtures/fake_acp_agent.py` (JSON-RPC 2.0 réel sur stdio, scénarios `nominal_stream`, `edit_with_diff_and_permission`, `elicitation_and_tos`, `faults_and_cancel`, `v31_env_audit`), MCP en mémoire (`Client(app)`) + pureté `stdout` et isolation d'environnement sur `ogy-mcp` / `ogy-subagents`, vraies exceptions `google.genai.errors.ClientError` (`429`/`402`/`400`) & `ServerError` (`5xx`) et préservation `thought_signature`.
-3. **Étage 3 — Snapshots visuels SVG (`@pytest.mark.snapshot`, `pytest-textual-snapshot`)** : rendu CSS/modales/sidebar en `(80, 24)`, `(120, 36)` et `(140, 40)` avec curseurs figés (`disable_blink_for_active_cursors`) et horloge gelée. Autoritaire sur `ubuntu-latest` en CI (artefact HTML visuel en cas d'échec).
-4. **Étage 4 — Terminal E2E réel (`@pytest.mark.e2e_tty`, PTY POSIX / ConPTY `pywinpty`) & Mutation hebdomadaire (`mutmut v3`)** : spinner `ogy wrap` TTY vs pipe, délégation TTY `ogy run` & coexistence simultanée V3.1 (`fake_agy_cli.py`), smoke test `ogy tui` live (`Ctrl+Q`), et job hebdomadaire `mutation.yml` (`ubuntu-latest`, `uv sync --all-extras --no-editable`) ciblant `firebreaks.py`, `router.py`, `pricing.py`, `context_health.py`, `profile.py` et `ogy_hooks/cli.py`.
+1. **Tier 1 — Deterministic Core (`pytest` + `time-machine` + `inline-snapshot` + `syrupy`)**: SQLite WAL, `2026-12-01` / `2027-01-01` pricing switches, midnight PT RPD reset (`America/Los_Angeles`), 30s `pending_tasks` TTL, 10s statusline debounce, 7-day LRU purge, CLI/HUD/V3.1 snapshots.
+2. **Tier 2 — Headless TUI & Real Protocols (`Pilot` + Fake ACP stdio + MCP stdio + Fake GenAI)**: `tests/fixtures/fake_acp_agent.py` (real JSON-RPC 2.0 over stdio, scenarios `nominal_stream`, `edit_with_diff_and_permission`, `elicitation_and_tos`, `faults_and_cancel`, `v31_env_audit`), in-memory MCP (`Client(app)`) + `stdout` purity and environment isolation on `ogy-mcp` / `ogy-subagents`, real `google.genai.errors.ClientError` (`429`/`402`/`400`) & `ServerError` (`5xx`), and `thought_signature` preservation.
+3. **Tier 3 — Visual SVG Snapshots (`@pytest.mark.snapshot`, `pytest-textual-snapshot`)**: CSS/modal/sidebar rendering at `(80, 24)`, `(120, 36)`, and `(140, 40)` with frozen cursors (`disable_blink_for_active_cursors`) and frozen clock. Authoritative on `ubuntu-latest` in CI (visual HTML diff artifact on failure).
+4. **Tier 4 — Real E2E Terminal (`@pytest.mark.e2e_tty`, POSIX PTY / ConPTY `pywinpty`) & Weekly Mutation (`mutmut v3`)**: `ogy wrap` TTY vs pipe spinner, `ogy run` TTY delegation & V3.1 simultaneous coexistence (`fake_agy_cli.py`), live `ogy tui` smoke test (`Ctrl+Q`), and weekly `mutation.yml` job (`ubuntu-latest`, `uv sync --all-extras --no-editable`) targeting `firebreaks.py`, `router.py`, `pricing.py`, `context_health.py`, `profile.py`, and `ogy_hooks/cli.py`.
 
-### Cartographie de la suite de tests (`tests/`)
+### Test Suite Map (`tests/`)
 
-| Fichier de test | Périmètre couvert |
+| Test File | Coverage Scope |
 | :--- | :--- |
-| `tests/conftest.py` | Garde-fou global d'isolation `HOME`/`USERPROFILE`/`OGY_DB_PATH`/`OGY_GEMINI_HOME` + factories `make_tui_app` / `make_seeded_tui_app` (sûr Textual #4998). |
-| `tests/fixtures/fake_acp_agent.py` | Fake ACP Agent déterministe sur stdio (`acp.Agent`/`run_agent`) avec 5 scénarios dont `v31_env_audit`. |
-| `tests/fixtures/fake_agy_cli.py` | Fake `agy` CLI pour les tests E2E TTY (`isatty()`, `OGY_ACTIVE`, `OGY_TASK_ID`, `--settings`). |
-| `tests/test_storage.py` | Schéma WAL, migrations `user_version`, UPSERTs idempotents, vues KPI, `pending_tasks`, détection `W1`–`W8`. |
-| `tests/test_pricing_health.py` | Catalogue tarifaire, bascules de dates (`2026-12-01`, `2027-01-01`), falaises 100K/200K, zones Green/Amber/Red, $K^*$. |
-| `tests/test_router_mcp.py` | Routage Stage 1/Stage 2 UCB1, outils `ogy-mcp`. |
-| `tests/test_firebreaks_wrap.py` | Anti-loop, seuils typés, tokenizer lexical shell, `bounded-aware`, `ogy wrap`/`recall`, GC LRU. |
-| `tests/test_hooks_statusline.py` | Contrats fail-open `ogy-hook`, `OGY_ACTIVE=1` vs pass-through, `injectSteps` handoff, rendu HUD `statusline`. |
-| `tests/test_cli.py` | Commandes `ogy` (`init`, `uninstall`, `doctor`, `config`, `stats`, `waste`, `audit`, `backup`, `restore`, `run --dry-run`). |
-| `tests/test_acp_client.py` | Protocole ACP v1 JSON-RPC 2.0 (in-memory & Fake ACP Agent stdio), validation des modes, `v31_env_audit`. |
-| `tests/test_orchestrator_v2.py` | `SessionOrchestrator`, *Switch Tax*, garde-fous ToS Section 6, propositions 1 touche. |
-| `tests/test_tui_app.py` | Tests UI Textual Pilot + Fake ACP stdio, streaming `anchor()`/`release_anchor()` (PR #6694), `paste-collapse`, modales, multi-sessions. |
-| `tests/test_tui_snapshots.py` | Snapshots visuels SVG (`@pytest.mark.snapshot`) sur accueil, streaming + sidebar et modales en `(80, 24)`, `(120, 36)`, `(140, 40)`. |
-| `tests/test_mcp_integration.py` | MCP en mémoire (`Client(app)`), pureté `stdout` JSON-RPC et isolation d'env V3.1 sur `ogy-mcp` et `ogy-subagents`. |
-| `tests/test_subagents_phase3.py` | Serveur `ogy-subagents`, vraies exceptions `google.genai.errors` (`429`/`402`/`400`/`5xx`), `thought_signature`, cascade secrets, `worktree`. |
-| `tests/test_cli_snapshots.py` | Tests temporels `time-machine`, payloads hooks `inline-snapshot` + `dirty-equals`, sorties CLI/HUD/V3.1 `syrupy`. |
-| `tests/test_e2e_tty.py` | Smoke tests E2E en vrai terminal PTY/ConPTY (`@pytest.mark.e2e_tty`) : `ogy wrap`, `ogy run` coexistence V3.1, `ogy tui` live. |
+| `tests/conftest.py` | Global isolation guard for `HOME`/`USERPROFILE`/`OGY_DB_PATH`/`OGY_GEMINI_HOME` + `make_tui_app` / `make_seeded_tui_app` factories (Textual #4998 safe). |
+| `tests/fixtures/fake_acp_agent.py` | Deterministic stdio Fake ACP Agent (`acp.Agent`/`run_agent`) with 5 scenarios including `v31_env_audit`. |
+| `tests/fixtures/fake_agy_cli.py` | Fake `agy` CLI for E2E TTY tests (`isatty()`, `OGY_ACTIVE`, `OGY_TASK_ID`, `--settings`). |
+| `tests/test_storage.py` | WAL schema, `user_version` migrations, idempotent UPSERTs, KPI views, `pending_tasks`, `W1`–`W8` detection. |
+| `tests/test_pricing_health.py` | Pricing catalogue, date switches (`2026-12-01`, `2027-01-01`), 100K/200K cliffs, Green/Amber/Red zones, $K^*$. |
+| `tests/test_router_mcp.py` | Stage 1 / Stage 2 UCB1 routing, `ogy-mcp` tools. |
+| `tests/test_firebreaks_wrap.py` | Anti-loop, typed thresholds, lexical shell tokenizer, `bounded-aware`, `ogy wrap`/`recall`, LRU GC. |
+| `tests/test_hooks_statusline.py` | Fail-open `ogy-hook` contracts, `OGY_ACTIVE=1` vs pass-through, `injectSteps` handoff, `statusline` HUD rendering. |
+| `tests/test_cli.py` | `ogy` commands (`init`, `uninstall`, `doctor`, `config`, `stats`, `waste`, `audit`, `backup`, `restore`, `run --dry-run`). |
+| `tests/test_acp_client.py` | ACP v1 JSON-RPC 2.0 protocol (in-memory & stdio Fake ACP Agent), mode validation, `v31_env_audit`. |
+| `tests/test_orchestrator_v2.py` | `SessionOrchestrator`, Switch Tax, ToS Section 6 guardrails, 1-key proposals. |
+| `tests/test_tui_app.py` | Textual Pilot + stdio Fake ACP UI tests, `anchor()`/`release_anchor()` streaming (PR #6694), `paste-collapse`, modals, multi-session isolation. |
+| `tests/test_tui_snapshots.py` | SVG visual snapshots (`@pytest.mark.snapshot`) for welcome, streaming + sidebar, and modals at `(80, 24)`, `(120, 36)`, `(140, 40)`. |
+| `tests/test_mcp_integration.py` | In-memory MCP (`Client(app)`), JSON-RPC `stdout` purity, and V3.1 env isolation on `ogy-mcp` and `ogy-subagents`. |
+| `tests/test_subagents_phase3.py` | `ogy-subagents` server, real `google.genai.errors` (`429`/`402`/`400`/`5xx`), `thought_signature`, secrets cascade, `worktree`. |
+| `tests/test_cli_snapshots.py` | `time-machine` temporal tests, `inline-snapshot` + `dirty-equals` hook payloads, `syrupy` CLI/HUD/V3.1 outputs. |
+| `tests/test_e2e_tty.py` | Real PTY/ConPTY E2E smoke tests (`@pytest.mark.e2e_tty`): `ogy wrap`, V3.1 `ogy run` coexistence, live `ogy tui`. |
 
-### Règles d'ingénierie pour toute contribution
+### Engineering Rules for Contributions
 
-1. **Zéro dépendance tierce dans `ogy_core`, `ogy_cli`, `ogy_hooks`, `ogy_statusline`** : tout import optionnel doit rester isolé dans `ogy_mcp`, `ogy_subagents` ou `ogy_frontends` avec un message d'erreur actionnable.
-2. **Zéro `print()` sur `stdout` dans les serveurs MCP et les hooks** : `stdout` est réservé aux trames JSON-RPC / payloads hooks ; tout diagnostic passe par `sys.stderr`.
-3. **Portabilité Windows & POSIX** : chemins normalisés via `pathlib.Path`, jamais de `~` ni de backslash nu dans les JSON générés pour `agy`, gestion des ACL Windows sur `secrets.env`, drainage dual-thread sur `subprocess.Popen`.
-4. **Idempotence & réversibilité** : toute écriture dans `~/.gemini/antigravity-cli/` par `ogy init` doit créer un backup `.ogy.bak` et taguer ses entrées `ogy-managed` afin que `ogy uninstall` reste 100 % non destructif pour les autres extensions utilisateur.
-5. **Règle d'ingénierie anti-régression & discipline agents** : chaque bug constaté une fois doit être verrouillé par un nouveau scénario du Fake ACP Agent ou un test Pilot / `time-machine` / isolation V3.1 (aucune validation manuelle déjà effectuée ne doit être à refaire). Avant toute fin de tâche, exécuter systématiquement `uv run -m pytest -q --tb=short` (ou `just dev` pendant l'itération).
+1. **Zero third-party dependencies in `ogy_core`, `ogy_cli`, `ogy_hooks`, `ogy_statusline`**: any optional import must remain isolated in `ogy_mcp`, `ogy_subagents`, or `ogy_frontends` with an actionable error message.
+2. **Zero `print()` on `stdout` in MCP servers and hooks**: `stdout` is strictly reserved for JSON-RPC frames / hook payloads; all diagnostics go to `sys.stderr`.
+3. **Windows & POSIX portability**: normalize paths via `pathlib.Path`, never emit `~` or raw backslashes in JSON generated for `agy`, handle Windows ACLs on `secrets.env`, and use dual-thread draining on `subprocess.Popen`.
+4. **Idempotency & reversibility**: every write to `~/.gemini/antigravity-cli/` by `ogy init` must create a `.ogy.bak` backup and tag its entries `ogy-managed` so `ogy uninstall` remains 100% non-destructive to other user extensions.
+5. **Anti-regression rule & agent discipline**: any bug encountered once must be locked down by a new Fake ACP Agent scenario or a Pilot / `time-machine` / V3.1 isolation test (never repeat manual validations). Before finishing any task, always run `uv run -m pytest -q --tb=short` (or `just dev` while iterating).
