@@ -1,0 +1,82 @@
+name: CI — Optigravity V3.5
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-gate-and-snapshots:
+    name: Fast Gate, Diff-Cover & SVG Snapshots (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository (full history for diff-cover)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python and locked dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Run full pytest suite with coverage & SVG snapshots
+        run: |
+          uv run -m pytest -n auto --timeout=30 \
+            --cov=ogy_core \
+            --cov=ogy_cli \
+            --cov=ogy_hooks \
+            --cov=ogy_statusline \
+            --cov=ogy_mcp \
+            --cov=ogy_subagents \
+            --cov=ogy_frontends \
+            --cov-report=xml \
+            -q --tb=short
+
+      - name: Enforce >= 85% diff-cover on Pull Requests
+        if: github.event_name == 'pull_request'
+        run: |
+          uv run diff-cover coverage.xml \
+            --compare-branch=origin/${{ github.base_ref }} \
+            --fail-under=85
+
+      - name: Upload visual SVG snapshot diff report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: textual-snapshot-report
+          path: |
+            snapshot_report.html
+            **/snapshot_report.html
+          if-no-files-found: ignore
+
+  cross-os-matrix:
+    name: Cross-OS Matrix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python and locked dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Run functional, V3.1 isolation, MCP stdio & E2E TTY tests
+        run: uv run -m pytest -m "not snapshot" -n auto --timeout=45 -q --tb=short

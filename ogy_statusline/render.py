@@ -140,8 +140,17 @@ def _quota_color(frac: float) -> str:
     return "31"      # red
 
 
-def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = None, persist: bool = True) -> str:
+def render_statusline(
+    payload: dict[str, Any],
+    *,
+    terminal_width: int | None = None,
+    persist: bool = True,
+    cfg: Any = None,
+) -> str:
     """Render a compact 1-line ANSI HUD string from statusLine JSON payload."""
+    resolved_cfg = cfg or load_config()
+    if resolved_cfg.isolate_hooks and os.environ.get("OGY_ACTIVE") != "1":
+        return ""
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else payload
     in_tok = _pick_int(usage, "input_tokens", "inputTokens")
     cr_tok = _pick_int(usage, "cache_read_input_tokens", "cache_read_tokens", "cacheReadInputTokens", "cacheReadTokens")
@@ -168,15 +177,14 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
     session_id = str(payload.get("conversationId") or payload.get("session_id") or payload.get("conversation_id") or "").strip()
 
     if persist and denom == 0 and total_usd == 0.0 and payload.get("agent_state") != "authenticating":
-        cfg = load_config()
-        sample_path = cfg.stash_dir.parent / "statusline_sample.json"
+        sample_path = resolved_cfg.stash_dir.parent / "statusline_sample.json"
         if not sample_path.is_file():
             try:
                 sample_path.parent.mkdir(parents=True, exist_ok=True)
                 sample_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             except OSError:
                 pass
-        fb_in, fb_cr, fb_cc, fb_ctx, fb_cost, fb_turns = _read_db_fallback(cfg.db_path, session_id)
+        fb_in, fb_cr, fb_cc, fb_ctx, fb_cost, fb_turns = _read_db_fallback(resolved_cfg.db_path, session_id)
         if fb_in + fb_cr + fb_cc > 0 or fb_cost > 0.0:
             in_tok, cr_tok, cc_tok = fb_in, fb_cr, fb_cc
             denom = in_tok + cr_tok + cc_tok
@@ -202,17 +210,16 @@ def render_statusline(payload: dict[str, Any], *, terminal_width: int | None = N
 
     if persist:
         if session_id:
-            cfg = load_config()
-            state_file = cfg.state_dir / f"sl_{session_id}.ts"
-            if _should_persist_snapshot(state_file, cfg.statusline_debounce_s):
+            state_file = resolved_cfg.state_dir / f"sl_{session_id}.ts"
+            if _should_persist_snapshot(state_file, resolved_cfg.statusline_debounce_s):
                 try:
-                    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
-                    conn = sqlite3.connect(str(cfg.db_path), timeout=0.45, isolation_level=None)
+                    resolved_cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+                    conn = sqlite3.connect(str(resolved_cfg.db_path), timeout=0.45, isolation_level=None)
                     try:
                         for p in INIT_PRAGMAS:
                             conn.execute(p)
                         ensure_schema(conn)
-                        ingest_statusline_payload(conn, payload, enterprise_cache=cfg.enterprise_cache_pricing)
+                        ingest_statusline_payload(conn, payload, enterprise_cache=resolved_cfg.enterprise_cache_pricing)
                     finally:
                         conn.close()
                 except sqlite3.Error:
@@ -273,7 +280,8 @@ def run_statusline_from_stdin() -> int:
         if not isinstance(payload, dict):
             payload = {}
         line = render_statusline(payload)
-        sys.stdout.write(line + "\n")
+        if line:
+            sys.stdout.write(line + "\n")
         sys.stdout.flush()
     except BaseException:
         try:

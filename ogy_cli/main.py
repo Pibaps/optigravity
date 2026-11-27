@@ -127,11 +127,41 @@ def cmd_doctor(probe_agy: bool = False, fix: bool = False, yes: bool = False) ->
     anomalies: list[tuple[str, str]] = []
 
     print(f"version     : optigravity {get_version()}")
+    print(f"profile_mode: {cfg.profile_mode} | isolate_hooks={cfg.isolate_hooks}")
     print(f"config_path : {cfg.config_path} (exists={cfg.config_path.is_file()})")
     print(f"db_path     : {cfg.db_path} (exists={cfg.db_path.is_file()})")
     print(f"agy_cli_dir : {cfg.agy_cli_dir} (exists={cfg.agy_cli_dir.is_dir()})")
     print(f"agy_cfg_dir : {cfg.agy_config_dir} (exists={cfg.agy_config_dir.is_dir()})")
     print(f"language    : {cfg.language} | overwrite_ok={cfg.overwrite_verified_ok}")
+
+    # 0. V3.1 profile isolation, OAuth links, shared residues & backups checks
+    from ogy_core.profile import (
+        check_oauth_links,
+        detect_ogy_residues_in_shared_gemini,
+        list_gemini_backups,
+    )
+
+    backups_dir = cfg.backups_dir or (Path.home() / ".local" / "share" / "optigravity" / "backups")
+    snaps = list_gemini_backups(backups_dir)
+    if snaps:
+        print(f"backups     : OK ({len(snaps)} snapshot(s), latest={snaps[-1]['snapshot_id']})")
+    else:
+        print(f"backups     : none ({backups_dir})")
+
+    if cfg.profile_mode == "isolated":
+        shared_dir = cfg.shared_gemini_dir or (Path.home() / ".gemini")
+        iso_dir = cfg.gemini_home or cfg.agy_cli_dir.parent
+        oauth_ok, oauth_details = check_oauth_links(shared_dir, iso_dir)
+        print(f"oauth_links : {'OK' if oauth_ok else 'WARN'} ({'; '.join(oauth_details)})")
+        if not oauth_ok:
+            anomalies.append(("oauth_links", "; ".join(oauth_details)))
+
+        residues = detect_ogy_residues_in_shared_gemini(shared_dir)
+        if residues:
+            print(f"shared_clean: WARN (ogy-managed residues in {shared_dir}: {', '.join(residues)})")
+            anomalies.append(("shared_residues", f"ogy-managed residues in {shared_dir}: {', '.join(residues)}"))
+        else:
+            print(f"shared_clean: OK ({shared_dir} has no ogy-managed residues)")
 
     # 1. agy binary check
     agy_bin = shutil.which("agy")
@@ -411,10 +441,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--non-interactive", action="store_true", help="Skip interactive wizard (CI/scripts)")
     p_init.add_argument("--lang", choices=["en", "fr"], default=None)
     p_init.add_argument("--privacy-mode", choices=["tier1_only", "free_first", "disabled"], default=None)
+    p_init_mode = p_init.add_mutually_exclusive_group()
+    p_init_mode.add_argument(
+        "--isolated",
+        action="store_const",
+        const="isolated",
+        dest="profile_mode",
+        help="Install into isolated Optigravity profile (keeps ~/.gemini untouched)",
+    )
+    p_init_mode.add_argument(
+        "--shared",
+        action="store_const",
+        const="shared",
+        dest="profile_mode",
+        help="Install directly into shared ~/.gemini profile",
+    )
+
+    p_backup = sub.add_parser("backup", help="Create or list full timestamped .gemini snapshots")
+    p_backup.add_argument("--list", dest="list_only", action="store_true", help="List available snapshots")
+
+    p_restore = sub.add_parser("restore", help="Restore .gemini exactly to a saved snapshot")
+    p_restore.add_argument("snapshot_id", nargs="?", default=None, help="Snapshot ID (YYYYMMDD-HHMMSS)")
+    p_restore.add_argument("--latest", action="store_true", help="Restore the most recent snapshot")
+    p_restore.add_argument("--dry-run", action="store_true", help="Show planned restore actions without modifying files")
 
     p_uninst = sub.add_parser("uninstall", help="Remove ogy-managed hooks, statusLine, rules, skills & MCP entry")
     p_uninst.add_argument("--purge-data", action="store_true", help="Also delete ogy.db, stash, and config.toml")
-    p_uninst.add_argument("--restore-backups", action="store_true", help="Restore *.ogy.bak files if present")
+    p_uninst.add_argument("--restore-backups", action="store_true", help="Restore initial snapshot (or *.ogy.bak fallback)")
     p_uninst.add_argument("--dry-run", action="store_true")
 
     p_cfg = sub.add_parser("config", help="Inspect, modify, validate, or edit config.toml")
@@ -502,6 +555,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             non_interactive=args.non_interactive,
             language=args.lang,
             privacy_mode=args.privacy_mode,
+            profile_mode=args.profile_mode,
+        )
+    if args.command == "backup":
+        from ogy_cli.init_audit import cmd_backup
+
+        return cmd_backup(list_only=args.list_only)
+    if args.command == "restore":
+        from ogy_cli.init_audit import cmd_restore
+
+        return cmd_restore(
+            snapshot_id=args.snapshot_id,
+            latest=args.latest,
+            dry_run=args.dry_run,
         )
     if args.command == "uninstall":
         from ogy_cli.init_audit import cmd_uninstall

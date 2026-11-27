@@ -16,6 +16,8 @@ CONFIG_SCHEMA: dict[str, tuple[str, Any, tuple[Any, ...] | None, str | None]] = 
     "general.language": ("str", "en", ("en", "fr"), "OGY_LANGUAGE"),
     "general.plan_tier": ("str", "pro", ("free", "pro", "ultra", "enterprise"), None),
     "general.db_path": ("str", "", None, "OGY_DB_PATH"),
+    "general.isolate_hooks": ("bool", True, None, None),
+    "general.profile_mode": ("str", "shared", ("shared", "isolated"), None),
     "hooks.overwrite_verified_ok": ("bool", True, None, None),
     "hooks.file_max_bytes": ("int", 24_576, None, None),
     "hooks.doc_max_bytes": ("int", 49_152, None, None),
@@ -39,6 +41,8 @@ def render_default_config_toml(
     language: str = "en",
     overwrite_verified_ok: bool = True,
     privacy_mode: str = "tier1_only",
+    isolate_hooks: bool = True,
+    profile_mode: str = "shared",
 ) -> str:
     """Return a clean, commented config.toml template."""
     return (
@@ -46,7 +50,9 @@ def render_default_config_toml(
         "# Manage safely with: ogy config show | get | set | validate | edit\n\n"
         "[general]\n"
         f'language = "{language}"  # "en" (default) or "fr"\n'
-        'plan_tier = "pro"  # "free", "pro", "ultra", "enterprise"\n\n'
+        'plan_tier = "pro"  # "free", "pro", "ultra", "enterprise"\n'
+        f"isolate_hooks = {'true' if isolate_hooks else 'false'}  # Skip ogy hooks/statusline when OGY_ACTIVE != 1\n"
+        f'profile_mode = "{profile_mode}"  # "isolated" (keeps ~/.gemini clean) or "shared"\n\n'
         "[hooks]\n"
         f"overwrite_verified_ok = {'true' if overwrite_verified_ok else 'false'}  # Silent rewrite via agy 1.5.16 overwrite\n"
         "file_max_bytes = 24576  # 24 KB limit for source code files without StartLine/EndLine\n"

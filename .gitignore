@@ -15,7 +15,11 @@ ENV/
 # Testing & caches
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
+.testmondata*
+mutants/
+snapshot_report.html
 
 # Optigravity runtime / local state
 .ogy/

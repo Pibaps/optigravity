@@ -25,6 +25,12 @@ class OgyConfig:
     budget_hard_cap_usd: float | None = None
     default_plan_tier: str = "pro"
     language: str = "en"
+    isolate_hooks: bool = True
+    profile_mode: str = "shared"
+    gemini_home: Path | None = None
+    shared_gemini_dir: Path | None = None
+    isolated_profile_root: Path | None = None
+    backups_dir: Path | None = None
     tui_enter_behavior: str = "submit"
     firebreak_file_max_bytes: int = 24_576
     firebreak_doc_max_bytes: int = 49_152
@@ -40,9 +46,20 @@ class OgyConfig:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+def _real_home() -> Path:
+    """Return the user's real home directory, honoring OGY_REAL_HOME when running under an isolated profile."""
+    override = os.environ.get("OGY_REAL_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home()
+
+
 def default_config_path() -> Path:
-    """Return ~/.config/optigravity/config.toml (never relies on env vars)."""
-    return Path.home() / ".config" / "optigravity" / "config.toml"
+    """Return ~/.config/optigravity/config.toml, overridable via OGY_CONFIG_PATH."""
+    override = os.environ.get("OGY_CONFIG_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _real_home() / ".config" / "optigravity" / "config.toml"
 
 
 def default_db_path() -> Path:
@@ -50,12 +67,12 @@ def default_db_path() -> Path:
     override = os.environ.get("OGY_DB_PATH", "").strip()
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".local" / "share" / "optigravity" / "ogy.db"
+    return _real_home() / ".local" / "share" / "optigravity" / "ogy.db"
 
 
 def load_config(config_path: Path | None = None) -> OgyConfig:
     """Load config.toml if present, falling back to safe defaults."""
-    home = Path.home()
+    home = _real_home()
     cfg_path = config_path or default_config_path()
     data: dict[str, Any] = {}
     if cfg_path.is_file():
@@ -90,6 +107,22 @@ def load_config(config_path: Path | None = None) -> OgyConfig:
     lang_raw = os.environ.get("OGY_LANGUAGE", "").strip() or str(general.get("language", "en")).strip()
     language = lang_raw.lower() if lang_raw.lower() in ("en", "fr") else "en"
 
+    isolate_hooks = bool(general.get("isolate_hooks", True))
+    profile_raw = str(general.get("profile_mode", "shared")).strip().lower()
+    profile_mode = profile_raw if profile_raw in ("isolated", "shared") else "shared"
+
+    shared_gemini_dir = home / ".gemini"
+    isolated_profile_root = home / ".local" / "share" / "optigravity" / "gemini-profile"
+    backups_dir = home / ".local" / "share" / "optigravity" / "backups"
+
+    env_gemini = os.environ.get("OGY_GEMINI_HOME", "").strip()
+    if env_gemini:
+        gemini_home = Path(env_gemini).expanduser()
+    elif profile_mode == "isolated":
+        gemini_home = isolated_profile_root / ".gemini"
+    else:
+        gemini_home = shared_gemini_dir
+
     enter_raw = str(tui_cfg.get("enter_behavior", "submit")).strip().lower()
     tui_enter_behavior = enter_raw if enter_raw in ("submit", "newline") else "submit"
 
@@ -99,8 +132,8 @@ def load_config(config_path: Path | None = None) -> OgyConfig:
     return OgyConfig(
         config_path=cfg_path,
         db_path=db_path,
-        agy_cli_dir=home / ".gemini" / "antigravity-cli",
-        agy_config_dir=home / ".gemini" / "config",
+        agy_cli_dir=gemini_home / "antigravity-cli",
+        agy_config_dir=gemini_home / "config",
         stash_dir=home / ".cache" / "optigravity" / "stash",
         state_dir=Path(tempfile.gettempdir()) / "ogy-state",
         overwrite_verified_ok=bool(hooks_cfg.get("overwrite_verified_ok", True)),
@@ -108,6 +141,12 @@ def load_config(config_path: Path | None = None) -> OgyConfig:
         budget_hard_cap_usd=hard_cap,
         default_plan_tier=str(general.get("plan_tier", "pro")),
         language=language,
+        isolate_hooks=isolate_hooks,
+        profile_mode=profile_mode,
+        gemini_home=gemini_home,
+        shared_gemini_dir=shared_gemini_dir,
+        isolated_profile_root=isolated_profile_root,
+        backups_dir=backups_dir,
         tui_enter_behavior=tui_enter_behavior,
         firebreak_file_max_bytes=int(hooks_cfg.get("file_max_bytes", 24_576)),
         firebreak_doc_max_bytes=int(hooks_cfg.get("doc_max_bytes", 49_152)),

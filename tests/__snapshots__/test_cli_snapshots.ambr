@@ -1,0 +1,111 @@
+# serializer version: 1
+# name: test_syrupy_firebreak_refusal_and_handoff[firebreak_large_file]
+  "[ogy] Large source file 'big_module.py' (34.5 KB, 2500 lines > 24 KB limit). Read a bounded slice using StartLine/EndLine (e.g. StartLine=1, EndLine=120)."
+# ---
+# name: test_syrupy_firebreak_refusal_and_handoff[handoff_md]
+  '''
+  # Session Handoff
+  **Goal:** Complete V3.5 test pyramid
+  **Modified files:**
+  - tests/test_cli_snapshots.py
+  **Checks:** pytest -q green
+  **Negative constraints:**
+  - DO NOT: Never touch host ~/.gemini
+  **Next step:** Run cross-OS CI matrix
+  
+  '''
+# ---
+# name: test_syrupy_stats_and_waste_reports[ogy_stats]
+  '''
+  ══ Optigravity ROI Summary ══
+    Cache tokens avoided (shown): 45.0K  |  Hook/wrap saved (7d): 0
+    Trend 7d : 1 sessions · cache 90.0% · est $0.0800
+    Trend 30d: 1 sessions · cache 90.0% · est $0.0800
+  
+  Sessions agy (OAuth)
+  ┌─────────┬───────┬───────┬────────┬──────────┬─────────┬────────┐
+  │ Session │ Model │ Turns │ Cache% │ Peak Ctx │ Est USD │ Status │
+  ├─────────┼───────┼───────┼────────┼──────────┼─────────┼────────┤
+  │ s-rep-1 │ -     │     1 │  90.0% │    50.0K │ $0.0800 │ active │
+  └─────────┴───────┴───────┴────────┴──────────┴─────────┴────────┘
+  
+  Subagents MCP (API USD)
+    No MCP subagent runs recorded yet (OAuth quota and Gemini API spend are tracked separately).
+  '''
+# ---
+# name: test_syrupy_stats_and_waste_reports[ogy_waste]
+  'No waste detected.'
+# ---
+# name: test_syrupy_statusline_ansi_and_no_color[statusline_narrow_no_color]
+  'ogy │ c:92% │ █░░░ 64K │ $0.24 │ 5h:88% │ wk:72% │ ▲ WARN'
+# ---
+# name: test_syrupy_statusline_ansi_and_no_color[statusline_wide_ansi]
+  '\x1b[1;36mogy\x1b[0m\x1b[90m │ \x1b[0mcache \x1b[32m92%\x1b[0m\x1b[90m │ \x1b[0mctx \x1b[32m█░░░░░\x1b[0m 64K (13%)\x1b[90m │ \x1b[0m\x1b[37m$0.24\x1b[0m\x1b[90m │ \x1b[0m5h \x1b[32m████░\x1b[0m 88%\x1b[90m │ \x1b[0mwk \x1b[32m████░\x1b[0m 72%\x1b[90m │ \x1b[0m\x1b[1;33m▲ WARN\x1b[0m'
+# ---
+# name: test_syrupy_statusline_ansi_and_no_color[statusline_wide_no_color]
+  'ogy │ cache 92% │ ctx █░░░░░ 64K (13%) │ $0.24 │ 5h ████░ 88% │ wk ████░ 72% │ ▲ WARN'
+# ---
+# name: test_syrupy_v31_backup_restore_and_doctor_modes[backup_list]
+  '''
+  Backups in <TMP>/_ogy_test_home/.local/share/optigravity/backups:
+    20261115-150000  2026-11-15T15:00:00Z  mode=shared  files=1  reason=init
+  
+  '''
+# ---
+# name: test_syrupy_v31_backup_restore_and_doctor_modes[doctor_isolated]
+  '''
+  version     : optigravity 0.2.0
+  profile_mode: isolated | isolate_hooks=True
+  config_path : <TMP>/_ogy_test_home/.config/optigravity/config.toml (exists=True)
+  db_path     : <TMP>/_ogy_test_home/.local/share/optigravity/ogy.db (exists=True)
+  agy_cli_dir : <TMP>/_ogy_test_home/.local/share/optigravity/gemini-profile/.gemini/antigravity-cli (exists=True)
+  agy_cfg_dir : <TMP>/_ogy_test_home/.local/share/optigravity/gemini-profile/.gemini/config (exists=True)
+  language    : en | overwrite_ok=True
+  backups     : OK (1 snapshot(s), latest=20261115-150000)
+  oauth_links : OK (oauth_creds.json: hardlink OK)
+  shared_clean: WARN (ogy-managed residues in <TMP>/_ogy_test_home/.gemini: antigravity-cli/settings.json (statusLine), config/hooks.json (ogy-telemetry-and-budget, ogy-firebreaks), config/mcp_config.json (optigravity, ogy-subagents), config/rules/ogy-hygiene.md, config/skills/ogy-budget/SKILL.md)
+  agy_binary  : C:/Users/pbapi/AppData/Local/agy/bin/agy.EXE
+  json:settings.json  : OK (valid JSON)
+  json:hooks.json     : OK (valid JSON)
+  json:mcp_config.json: OK (valid JSON)
+  config_toml : OK
+  secrets.env : not present
+  sqlite_wal  : journal_mode=wal, user_version=2/2, quick_check=ok
+  hook_latency: <MS> ms (OK, target < 25 ms)
+  gemini_api  : SKIP (not configured for privacy_mode=tier1_only)
+  
+  '''
+# ---
+# name: test_syrupy_v31_backup_restore_and_doctor_modes[doctor_shared]
+  '''
+  version     : optigravity 0.2.0
+  profile_mode: shared | isolate_hooks=True
+  config_path : <TMP>/_ogy_test_home/.config/optigravity/config.toml (exists=True)
+  db_path     : <TMP>/_ogy_test_home/.local/share/optigravity/ogy.db (exists=False)
+  agy_cli_dir : <TMP>/_ogy_test_home/.gemini/antigravity-cli (exists=True)
+  agy_cfg_dir : <TMP>/_ogy_test_home/.gemini/config (exists=True)
+  language    : en | overwrite_ok=True
+  backups     : OK (1 snapshot(s), latest=20261115-150000)
+  agy_binary  : C:/Users/pbapi/AppData/Local/agy/bin/agy.EXE
+  json:settings.json  : OK (valid JSON)
+  json:hooks.json     : OK (valid JSON)
+  json:mcp_config.json: OK (valid JSON)
+  config_toml : OK
+  secrets.env : not present
+  sqlite_wal  : journal_mode=wal, user_version=2/2, quick_check=ok
+  hook_latency: <MS> ms (OK, target < 25 ms)
+  gemini_api  : SKIP (not configured for privacy_mode=tier1_only)
+  
+  '''
+# ---
+# name: test_syrupy_v31_backup_restore_and_doctor_modes[restore_dry_run]
+  '''
+  [dry-run] Restored snapshot 20261115-150000 -> <TMP>/_ogy_test_home/.gemini
+  [dry-run]   Restore antigravity-cli/settings.json
+  [dry-run]   Delete config/hooks.json (did not exist in snapshot)
+  [dry-run]   Delete config/mcp_config.json (did not exist in snapshot)
+  [dry-run]   Delete config/rules/ogy-hygiene.md (added after snapshot)
+  [dry-run]   Delete config/skills/ogy-budget/SKILL.md (added after snapshot)
+  
+  '''
+# ---

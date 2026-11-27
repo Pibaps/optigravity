@@ -6,7 +6,7 @@ import asyncio
 import os
 import shutil
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +20,7 @@ from ogy_core import get_version
 from ogy_core.config import OgyConfig, load_config
 from ogy_core.ingest import ingest_acp_turn
 from ogy_core.pricing import normalize_model_id
+from ogy_core.profile import build_agy_subprocess_env
 from ogy_core.storage import canonical_args_hash, connect, upsert_tool_call, utc_now_iso
 
 CLIENT_NAME = "optigravity"
@@ -46,6 +47,7 @@ class AcpClientConfig:
     log_file: str | None = None
     disable_telemetry: bool = True
     auth_method: str = "oauth-personal"
+    command_override: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +164,15 @@ AcpEvent = (
 )
 
 
-def build_agy_acp_args(cfg: AcpClientConfig) -> list[str]:
-    """Build official `agy acp` CLI flags."""
+def build_agy_acp_args(
+    cfg: AcpClientConfig,
+    *,
+    settings_path: Path | str | None = None,
+) -> list[str]:
+    """Build official `agy acp` CLI flags (including `--settings` in V3.1 isolated mode)."""
     args: list[str] = ["acp"]
+    if settings_path:
+        args.extend(["--settings", str(settings_path)])
     if cfg.sandbox:
         args.append("--sandbox")
     for d in cfg.add_dirs:
@@ -179,6 +187,15 @@ def build_agy_acp_args(cfg: AcpClientConfig) -> list[str]:
     if cfg.disable_telemetry:
         args.append("--disable-telemetry")
     return args
+
+
+def build_agy_acp_env(
+    ogy_cfg: OgyConfig,
+    *,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build subprocess environment for `agy acp` (OGY_ACTIVE=1 + V3.1 profile isolation)."""
+    return build_agy_subprocess_env(ogy_cfg, base_env=base_env)
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -363,18 +380,30 @@ class AcpClient:
             self._conn = agent_conn
         else:
             self._exit_stack = AsyncExitStack()
-            env = os.environ.copy()
-            env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
-            args = build_agy_acp_args(self.config)
+            env = build_agy_acp_env(self.ogy_config)
             bridge = _BridgeClient(self)
-            agy_bin = shutil.which(self.config.agy_bin) or self.config.agy_bin
+            gemini_dir = self.ogy_config.gemini_home or self.ogy_config.agy_cli_dir.parent
+            settings_path: Path | None = (
+                (gemini_dir / "antigravity-cli" / "settings.json")
+                if self.ogy_config.profile_mode == "isolated"
+                else None
+            )
+            if self.config.command_override:
+                cmd = self.config.command_override[0]
+                args = list(self.config.command_override[1:])
+                if settings_path and "--settings" not in args:
+                    args.extend(["--settings", str(settings_path)])
+            else:
+                cmd = shutil.which(self.config.agy_bin) or self.config.agy_bin
+                args = build_agy_acp_args(self.config, settings_path=settings_path)
             conn, proc = await self._exit_stack.enter_async_context(
                 acp.spawn_agent_process(
                     bridge,
-                    agy_bin,
+                    cmd,
                     *args,
                     env=env,
                     cwd=self.config.cwd,
+                    use_unstable_protocol=True,
                 )
             )
             self._conn = conn

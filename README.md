@@ -149,14 +149,18 @@ Launches the interactive Textual 8+ TUI backed by `agy acp` (ACP v1 JSON-RPC 2.0
 * `--model <slug>` / `--effort <level>` — Pin initial model/effort (skips 1st-prompt Stage 1 auto-routing)
 * `--lang <fr|en>` — Interface language (`fr` default, or `en`; switchable live via `/lang`)
 
-### `ogy init [OPTIONS]` & `ogy uninstall [OPTIONS]`
-* `ogy init [--dry-run] [--enable-firebreaks] [--non-interactive] [--lang en|fr] [--privacy-mode tier1_only|free_first|disabled]`
+### `ogy init [OPTIONS]`, `ogy backup`, `ogy restore` & `ogy uninstall [OPTIONS]`
+* `ogy init [--isolated|--shared] [--dry-run] [--enable-firebreaks] [--non-interactive] [--lang en|fr] [--privacy-mode tier1_only|free_first|disabled]`
   Guided, idempotent setup installing `statusLine`, `hooks.json`, lazy MCP entries (`optigravity` + optional `ogy-subagents`, tagged `ogy-managed`), `ogy-hygiene.md`, `ogy-budget/SKILL.md`, and a commented `~/.config/optigravity/config.toml`.
+  * `--isolated` keeps `~/.gemini/` 100 % untouched, installs `ogy` configs under `~/.local/share/optigravity/gemini-profile/.gemini/` (linking only OAuth files), and launches `agy` with `--settings` + isolated environment so `ogy` and native `agy` can run simultaneously without interference.
+  * `--shared` installs into `~/.gemini/` after creating a full timestamped snapshot (`~/.local/share/optigravity/backups/<YYYYMMDD-HHMMSS>/`) + `*.ogy.bak` backups; by default `[general] isolate_hooks = true` short-circuits hooks/statusline whenever `OGY_ACTIVE != 1`.
+* `ogy backup [--list]` — Create a timestamped full `.gemini` snapshot (SHA-256 `manifest.json`, deduplicated) or list existing snapshots.
+* `ogy restore [<snapshot_id>|--latest] [--dry-run]` — Restore `.gemini` byte-for-byte to a snapshot (restoring original files and removing files added afterwards).
 * `ogy uninstall [--purge-data] [--restore-backups] [--dry-run]`
-  Cleanly removes only `ogy-managed` entries without touching other user extensions, optionally restoring `.ogy.bak` backups or purging `ogy.db` / stash.
+  Cleanly removes only `ogy-managed` entries without touching other user extensions, optionally restoring the initial snapshot (with `*.ogy.bak` fallback) or purging `ogy.db` / stash / isolated profile.
 
 ### `ogy doctor [--probe-agy] [--fix] [-y]`
-Checks `agy` availability, JSON validity (`settings.json`, `hooks.json`, `mcp_config.json`), `config.toml` validation, `secrets.env` permissions (`0600` on POSIX), SQLite WAL integrity (`PRAGMA quick_check` + `user_version`), measured `ogy-hook` hot-path latency (`< 25 ms` target), and 0-token Gemini API connectivity. Pass `--fix` to repair deterministic anomalies automatically.
+Checks `profile_mode` (`isolated` vs `shared`), `isolate_hooks`, `.gemini` backups, OAuth link integrity and shared `~/.gemini/` residues in `isolated` mode, `agy` availability, JSON validity (`settings.json`, `hooks.json`, `mcp_config.json`), `config.toml` validation, `secrets.env` permissions (`0600` on POSIX), SQLite WAL integrity (`PRAGMA quick_check` + `user_version`), measured `ogy-hook` hot-path latency (`< 25 ms` target), and 0-token Gemini API connectivity. Pass `--fix` to repair deterministic anomalies automatically.
 
 ### `ogy config [show|get|set|validate|edit] [key] [value] [--json]`
 Inspects typed configuration values with provenance (`default`, `config.toml`, `env`), updates keys with validation, or opens `config.toml` in `$EDITOR`.
@@ -285,6 +289,8 @@ Managed safely via `ogy config show|get|set|validate|edit` at `~/.config/optigra
 [general]
 language = "en"              # "en" (default) or "fr"
 plan_tier = "pro"            # "free", "pro", "ultra", "enterprise"
+isolate_hooks = true         # Skip ogy hooks/statusline when OGY_ACTIVE != 1
+profile_mode = "shared"      # "isolated" (keeps ~/.gemini clean) or "shared"
 # db_path = "~/.local/share/optigravity/ogy.db"
 
 [hooks]
@@ -317,7 +323,7 @@ worktree_enabled = false
 
 ## 13. Troubleshooting & Safety
 
-* **Running tests**: `uv run pytest -q --tb=short` (57 unit & Textual Pilot tests).
+* **Running tests**: `uv run -m pytest -m "not snapshot" -n auto --timeout=45 -q --tb=short` (97+ automated tests covering core, Fake ACP Agent stdio, MCP stdio, `time-machine`, `syrupy`/`inline-snapshot`, and E2E PTY/ConPTY; plus SVG visual snapshots via `pytest -m snapshot`). Cross-platform shortcuts are available in `Justfile` (`just dev`, `just tui`, `just v31`, `just all`, `just snap-update`).
 * **SQLite concurrency**: Schema migrations are gated by `PRAGMA user_version`; read paths (`stats`, `waste`, TUI telemetry worker, statusline fallback) use `mode=ro` read-only connections.
 * **Windows paths**: Never use `~` or single backslashes `\` inside `settings.json` or `hooks.json`; `ogy init` handles this automatically.
 

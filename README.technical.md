@@ -102,7 +102,7 @@ Le projet utilise `hatchling>=1.25.0` (`pyproject.toml`, Python `>=3.12`, versio
 
 | Package / Répertoire | Dépendances | Rôle technique |
 | :--- | :--- | :--- |
-| `ogy_core/` | Stdlib uniquement | Configuration (`config.py`), persistance SQLite WAL & détection `W1`–`W8` (`storage.py`), ingestion transcripts/DBs `agy` (`ingest.py`), routage 2-étages (`router.py`), santé du contexte & handoff (`context_health.py`), tarification versionnée (`pricing.py`), coupe-feu & compression shell (`firebreaks.py`). |
+| `ogy_core/` | Stdlib uniquement | Configuration (`config.py`), isolation profil & backup/restore `.gemini` (`profile.py`), persistance SQLite WAL & détection `W1`–`W8` (`storage.py`), ingestion transcripts/DBs `agy` (`ingest.py`), routage 2-étages (`router.py`), santé du contexte & handoff (`context_health.py`), tarification versionnée (`pricing.py`), coupe-feu & compression shell (`firebreaks.py`). |
 | `ogy_cli/` | Stdlib uniquement | Point d'entrée `ogy` (`main.py`), wrapper `ogy run` (`wrapper.py`), assistant `init`/`uninstall`/`doctor`/`audit` (`init_audit.py`), gestion typée de `config.toml` (`config_cmd.py`), rendu ROI `stats`/`waste` (`stats_render.py`). |
 | `ogy_hooks/` | Stdlib uniquement | Point d'entrée `ogy-hook` (`cli.py`) dispatchant `session-start`, `pre-tool`, `post-tool`, `pre-invocation`, `post-invocation`, `stop` et `statusline`. |
 | `ogy_statusline/` | Stdlib uniquement | Rendu HUD 1 ligne ANSI adaptatif à la largeur du terminal, debouncing SQLite 10 s et respect `NO_COLOR` (`render.py`). |
@@ -324,12 +324,12 @@ Déporte les tâches volumineuses ou de recherche en lecture seule vers la Gemin
 | Stash `ogy wrap` | `~/.cache/optigravity/stash/<hash>/` | Contient `stdout.log`, `stderr.log`, `meta.json`. |
 | Corrélation `ogy run` | `~/.cache/optigravity/pending_tasks/` | Fichiers atomiques éphémères (TTL 30 s). |
 | État temporaire hooks | `<tempdir>/ogy-state/` | Debounce statusline et états éphémères. |
-| Intégration `agy` | `~/.gemini/antigravity-cli/{settings.json,hooks.json,mcp_config.json}` | Backups `*.ogy.bak` créés par `ogy init`, entrées taguées `ogy-managed`. |
-| Règles & skills `agy` | `~/.gemini/config/rules/ogy-hygiene.md` | Injecté par `ogy init`. |
+| Intégration `agy` | `~/.gemini/{antigravity-cli,config}/` (mode `shared`) ou `~/.local/share/optigravity/gemini-profile/.gemini/` (mode `isolated`) | En mode `shared` : snapshots complets `~/.local/share/optigravity/backups/<YYYYMMDD-HHMMSS>/` + `*.ogy.bak` + garde-fou `OGY_ACTIVE=1`. En mode `isolated` : `~/.gemini/` 100 % vierge, OAuth lié (symlink/hardlink/jonction NTFS), `agy` lancé avec `--settings` + `USERPROFILE`/`HOME` isolés. |
+| Règles & skills `agy` | `.../config/rules/ogy-hygiene.md` & `.../config/skills/ogy-budget/SKILL.md` | Injecté par `ogy init` dans le profil actif. |
 
 ### Précédence de configuration (`ogy_core/config.py`)
 
-`défauts OgyConfig` < `~/.config/optigravity/config.toml` < variables d'environnement (`OGY_DB_PATH`, `OGY_LANGUAGE`, `OGY_NO_WRAP`).
+`défauts OgyConfig` < `~/.config/optigravity/config.toml` < variables d'environnement (`OGY_DB_PATH`, `OGY_CONFIG_PATH`, `OGY_GEMINI_HOME`, `OGY_REAL_HOME`, `OGY_ACTIVE`, `OGY_LANGUAGE`, `OGY_NO_WRAP`).
 
 ### Cascade de résolution des secrets (`ogy_subagents/secrets.py`)
 
@@ -344,34 +344,51 @@ Aucune clé n'est jamais écrite dans `mcp_config.json` ni journalisée : `Redac
 
 ## 9. Développement, Tests & Conventions d'ingénierie
 
-### Environnement de développement
+### Environnement de développement & Boucle locale (`Justfile`)
 
 ```bash
-# Avec uv
+# Avec uv (mode module recommandé)
 uv sync --all-extras
-uv run pytest -q --tb=short
+uv run -m pytest -q --tb=short
 
-# Ou avec venv + pip standard
-python3 -m venv .venv
-source .venv/bin/activate   # Windows PowerShell : .\.venv\Scripts\Activate.ps1
-pip install -e ".[all,dev]"
-pytest -q --tb=short
+# Boucle locale incrémentale (Justfile cross-platform PowerShell + bash)
+just dev          # uv run -m pytest --testmon -q --tb=short
+just tui          # uv run -m pytest tests/test_tui_app.py tests/test_acp_client.py -q --tb=short
+just v31          # uv run -m pytest -k "isolated or backup or restore or ogy_active" -q --tb=short
+just snap-update  # uv run -m pytest -m snapshot --snapshot-update
+just all          # uv run -m pytest -n auto --timeout=30 -q --tb=short
 ```
+
+### Pyramide de tests automatisés V3.5 (4 étages)
+
+L'ensemble de la suite tourne sans jamais invoquer le binaire réel `agy` ni consommer de quotas OAuth. Le garde-fou global `tests/conftest.py` isole systématiquement `HOME`/`USERPROFILE`, `OGY_DB_PATH`, `OGY_CONFIG_PATH` et `OGY_GEMINI_HOME` dans `tmp_path` pour garantir zéro pollution du `~/.gemini/` hôte (y compris sous `pytest-xdist` et `mutmut`).
+
+1. **Étage 1 — Noyau déterministe (`pytest` + `time-machine` + `inline-snapshot` + `syrupy`)** : SQLite WAL, bascules tarifaires `2026-12-01` / `2027-01-01`, reset RPD minuit PT (`America/Los_Angeles`), TTL `pending_tasks` 30 s, debounce statusline 10 s, purge LRU 7 j, snapshots CLI/HUD/V3.1.
+2. **Étage 2 — TUI Headless & Protocoles réels (`Pilot` + Fake ACP stdio + MCP stdio + Fake GenAI)** : `tests/fixtures/fake_acp_agent.py` (JSON-RPC 2.0 réel sur stdio, scénarios `nominal_stream`, `edit_with_diff_and_permission`, `elicitation_and_tos`, `faults_and_cancel`, `v31_env_audit`), MCP en mémoire (`Client(app)`) + pureté `stdout` et isolation d'environnement sur `ogy-mcp` / `ogy-subagents`, vraies exceptions `google.genai.errors.ClientError` (`429`/`402`/`400`) & `ServerError` (`5xx`) et préservation `thought_signature`.
+3. **Étage 3 — Snapshots visuels SVG (`@pytest.mark.snapshot`, `pytest-textual-snapshot`)** : rendu CSS/modales/sidebar en `(80, 24)`, `(120, 36)` et `(140, 40)` avec curseurs figés (`disable_blink_for_active_cursors`) et horloge gelée. Autoritaire sur `ubuntu-latest` en CI (artefact HTML visuel en cas d'échec).
+4. **Étage 4 — Terminal E2E réel (`@pytest.mark.e2e_tty`, PTY POSIX / ConPTY `pywinpty`) & Mutation hebdomadaire (`mutmut v3`)** : spinner `ogy wrap` TTY vs pipe, délégation TTY `ogy run` & coexistence simultanée V3.1 (`fake_agy_cli.py`), smoke test `ogy tui` live (`Ctrl+Q`), et job hebdomadaire `mutation.yml` (`ubuntu-latest`, `uv sync --all-extras --no-editable`) ciblant `firebreaks.py`, `router.py`, `pricing.py`, `context_health.py`, `profile.py` et `ogy_hooks/cli.py`.
 
 ### Cartographie de la suite de tests (`tests/`)
 
 | Fichier de test | Périmètre couvert |
 | :--- | :--- |
+| `tests/conftest.py` | Garde-fou global d'isolation `HOME`/`USERPROFILE`/`OGY_DB_PATH`/`OGY_GEMINI_HOME` + factories `make_tui_app` / `make_seeded_tui_app` (sûr Textual #4998). |
+| `tests/fixtures/fake_acp_agent.py` | Fake ACP Agent déterministe sur stdio (`acp.Agent`/`run_agent`) avec 5 scénarios dont `v31_env_audit`. |
+| `tests/fixtures/fake_agy_cli.py` | Fake `agy` CLI pour les tests E2E TTY (`isatty()`, `OGY_ACTIVE`, `OGY_TASK_ID`, `--settings`). |
 | `tests/test_storage.py` | Schéma WAL, migrations `user_version`, UPSERTs idempotents, vues KPI, `pending_tasks`, détection `W1`–`W8`. |
 | `tests/test_pricing_health.py` | Catalogue tarifaire, bascules de dates (`2026-12-01`, `2027-01-01`), falaises 100K/200K, zones Green/Amber/Red, $K^*$. |
 | `tests/test_router_mcp.py` | Routage Stage 1/Stage 2 UCB1, outils `ogy-mcp`. |
 | `tests/test_firebreaks_wrap.py` | Anti-loop, seuils typés, tokenizer lexical shell, `bounded-aware`, `ogy wrap`/`recall`, GC LRU. |
-| `tests/test_hooks_statusline.py` | Contrats fail-open `ogy-hook`, `injectSteps` handoff, rendu HUD `statusline` et debounce. |
-| `tests/test_cli.py` | Commandes `ogy` (`init`, `uninstall`, `doctor`, `config`, `stats`, `waste`, `audit`, `run --dry-run`). |
-| `tests/test_acp_client.py` | Protocole ACP v1 JSON-RPC 2.0, validation des modes, ingestion tours ACP. |
+| `tests/test_hooks_statusline.py` | Contrats fail-open `ogy-hook`, `OGY_ACTIVE=1` vs pass-through, `injectSteps` handoff, rendu HUD `statusline`. |
+| `tests/test_cli.py` | Commandes `ogy` (`init`, `uninstall`, `doctor`, `config`, `stats`, `waste`, `audit`, `backup`, `restore`, `run --dry-run`). |
+| `tests/test_acp_client.py` | Protocole ACP v1 JSON-RPC 2.0 (in-memory & Fake ACP Agent stdio), validation des modes, `v31_env_audit`. |
 | `tests/test_orchestrator_v2.py` | `SessionOrchestrator`, *Switch Tax*, garde-fous ToS Section 6, propositions 1 touche. |
-| `tests/test_tui_app.py` | Tests UI Textual Pilot (composer, streaming, modales, isolation multi-sessions, sidebar). |
-| `tests/test_subagents_phase3.py` | Serveur `ogy-subagents`, routeur 429/402, cascade secrets & redaction, outils read-only, `worktree`. |
+| `tests/test_tui_app.py` | Tests UI Textual Pilot + Fake ACP stdio, streaming `anchor()`/`release_anchor()` (PR #6694), `paste-collapse`, modales, multi-sessions. |
+| `tests/test_tui_snapshots.py` | Snapshots visuels SVG (`@pytest.mark.snapshot`) sur accueil, streaming + sidebar et modales en `(80, 24)`, `(120, 36)`, `(140, 40)`. |
+| `tests/test_mcp_integration.py` | MCP en mémoire (`Client(app)`), pureté `stdout` JSON-RPC et isolation d'env V3.1 sur `ogy-mcp` et `ogy-subagents`. |
+| `tests/test_subagents_phase3.py` | Serveur `ogy-subagents`, vraies exceptions `google.genai.errors` (`429`/`402`/`400`/`5xx`), `thought_signature`, cascade secrets, `worktree`. |
+| `tests/test_cli_snapshots.py` | Tests temporels `time-machine`, payloads hooks `inline-snapshot` + `dirty-equals`, sorties CLI/HUD/V3.1 `syrupy`. |
+| `tests/test_e2e_tty.py` | Smoke tests E2E en vrai terminal PTY/ConPTY (`@pytest.mark.e2e_tty`) : `ogy wrap`, `ogy run` coexistence V3.1, `ogy tui` live. |
 
 ### Règles d'ingénierie pour toute contribution
 
@@ -379,3 +396,4 @@ pytest -q --tb=short
 2. **Zéro `print()` sur `stdout` dans les serveurs MCP et les hooks** : `stdout` est réservé aux trames JSON-RPC / payloads hooks ; tout diagnostic passe par `sys.stderr`.
 3. **Portabilité Windows & POSIX** : chemins normalisés via `pathlib.Path`, jamais de `~` ni de backslash nu dans les JSON générés pour `agy`, gestion des ACL Windows sur `secrets.env`, drainage dual-thread sur `subprocess.Popen`.
 4. **Idempotence & réversibilité** : toute écriture dans `~/.gemini/antigravity-cli/` par `ogy init` doit créer un backup `.ogy.bak` et taguer ses entrées `ogy-managed` afin que `ogy uninstall` reste 100 % non destructif pour les autres extensions utilisateur.
+5. **Règle d'ingénierie anti-régression & discipline agents** : chaque bug constaté une fois doit être verrouillé par un nouveau scénario du Fake ACP Agent ou un test Pilot / `time-machine` / isolation V3.1 (aucune validation manuelle déjà effectuée ne doit être à refaire). Avant toute fin de tâche, exécuter systématiquement `uv run -m pytest -q --tb=short` (ou `just dev` pendant l'itération).

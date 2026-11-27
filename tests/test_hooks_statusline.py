@@ -38,11 +38,12 @@ def test_hot_path_stdlib_only() -> None:
     assert res.returncode == 0, res.stderr
 
 
-def test_hook_p95_latency_and_pending_task_correlation(tmp_path: Path) -> None:
+def test_hook_p95_latency_and_pending_task_correlation(tmp_path: Path, monkeypatch) -> None:
     import time
 
     from ogy_core.storage import connect, query_all, write_pending_task
 
+    monkeypatch.setenv("OGY_ACTIVE", "1")
     cfg = _cfg(tmp_path)
     # Warm DB schema once (steady state)
     conn = connect(cfg.db_path, init_schema=True)
@@ -128,7 +129,8 @@ def test_hooks_fail_open_on_bad_stdin(monkeypatch, capsys) -> None:
     assert out2 == {}
 
 
-def test_session_start_handoff_and_stop_flow(tmp_path: Path) -> None:
+def test_session_start_handoff_and_stop_flow(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OGY_ACTIVE", "1")
     cfg = _cfg(tmp_path)
     handoff = tmp_path / ".ogy" / "handoff.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +168,7 @@ def test_session_start_handoff_and_stop_flow(tmp_path: Path) -> None:
 
 def test_statusline_render_wide_and_narrow(monkeypatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("OGY_ACTIVE", "1")
     payload = {
         "conversationId": "sess-sl",
         "modelName": "gemini-4-hydrogen",
@@ -186,6 +189,7 @@ def test_statusline_render_wide_and_narrow(monkeypatch) -> None:
 
 def test_statusline_camelcase_and_db_fallback(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("OGY_ACTIVE", "1")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db_path = tmp_path / "ogy.db"
     monkeypatch.setenv("OGY_DB_PATH", str(db_path))
@@ -226,3 +230,59 @@ def test_statusline_camelcase_and_db_fallback(monkeypatch, tmp_path: Path) -> No
         persist=True,
     )
     assert fb_line == "ogy │ cache 80% │ ctx █░░░░░ 20K (10%) │ t1 · $0.05 │ 5h ███░░ 60% │ ● OK"
+
+
+def test_v31_ogy_active_guard_and_opt_out(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Lot 3.1.1: without OGY_ACTIVE=1 and with isolate_hooks=True, hooks & statusline short-circuit with 0 DB writes."""
+    monkeypatch.delenv("OGY_ACTIVE", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    cfg = _cfg(tmp_path)
+    assert cfg.isolate_hooks is True
+
+    handoff = tmp_path / ".ogy" / "handoff.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("# Keep untouched when OGY_ACTIVE is absent", encoding="utf-8")
+
+    # 1. PreToolUse returns {"decision": "allow"} even on a lockfile/verbose command, with 0 DB writes
+    assert (
+        dispatch_hook(
+            "pre-tool",
+            {"conversationId": "native-1", "toolCall": {"name": "view_file", "args": {"Path": str(tmp_path / "uv.lock")}}},
+            cfg=cfg,
+        )
+        == {"decision": "allow"}
+    )
+    # 2. All other hooks return {} with 0 DB writes and do not touch handoff.md
+    assert dispatch_hook("session-start", {"conversationId": "native-1", "workspacePaths": [str(tmp_path)]}, cfg=cfg) == {}
+    assert dispatch_hook("pre-invocation", {"conversationId": "native-1", "invocationNum": 1}, cfg=cfg) == {}
+    assert dispatch_hook("post-tool", {"conversationId": "native-1", "stepIdx": 1, "toolCall": {"name": "run_command", "args": {}}}, cfg=cfg) == {}
+    assert dispatch_hook("post-invocation", {"conversationId": "native-1"}, cfg=cfg) == {}
+    assert dispatch_hook("stop", {"conversationId": "native-1"}, cfg=cfg) == {}
+    assert handoff.is_file()
+    assert not cfg.db_path.exists()
+
+    # 3. Statusline returns empty string and 0 DB writes
+    sl_payload = {
+        "conversationId": "native-sl",
+        "usage": {"input_tokens": 2_000, "cache_read_input_tokens": 8_000},
+        "context_window": {"used": 10_000, "max": 200_000},
+        "cost": {"total_usd": 0.12},
+    }
+    assert render_statusline(sl_payload, terminal_width=140, persist=True, cfg=cfg) == ""
+    assert not cfg.db_path.exists()
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(sl_payload)))
+    assert hooks_main(["statusline"]) == 0
+    assert capsys.readouterr().out == ""
+
+    # 4. Explicit opt-out (isolate_hooks=False) re-enables hooks & statusline without OGY_ACTIVE
+    cfg_optout = _cfg(tmp_path)
+    cfg_optout.isolate_hooks = False
+    res_lock = dispatch_hook(
+        "pre-tool",
+        {"conversationId": "native-2", "toolCall": {"name": "view_file", "args": {"Path": str(tmp_path / "uv.lock")}}},
+        cfg=cfg_optout,
+    )
+    assert res_lock["decision"] == "deny"
+    assert "ogy" in render_statusline(sl_payload, terminal_width=140, persist=False, cfg=cfg_optout)

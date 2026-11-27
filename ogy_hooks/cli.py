@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -319,6 +320,10 @@ def dispatch_hook(event: str, payload: dict[str, Any], cfg: OgyConfig | None = N
     """Dispatch a hook event with a pre-parsed payload (testable without stdin)."""
     t0 = time.perf_counter()
     resolved_cfg = cfg or load_config()
+    if resolved_cfg.isolate_hooks and os.environ.get("OGY_ACTIVE") != "1":
+        if event == "pre-tool":
+            return {"decision": "allow"}
+        return {}
     if event == "session-start":
         return _handle_session_start(payload, resolved_cfg)
     if event == "pre-tool":

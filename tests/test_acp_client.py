@@ -20,6 +20,7 @@ from ogy_frontends.acp_tui.client import (
     PermissionRequestEvent,
     UsageEvent,
     build_agy_acp_args,
+    build_agy_acp_env,
 )
 
 
@@ -203,3 +204,279 @@ def test_acp_permission_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         assert resp.outcome.option_id == "allow_once"
 
     asyncio.run(_run())
+
+
+def test_v31_acp_env_and_command_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lot 3.1.1 / 3.1.3 / V3.5 prep: OGY_ACTIVE=1, isolated profile env, and command_override."""
+    import acp
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("OGY_GEMINI_HOME", raising=False)
+    monkeypatch.delenv("OGY_REAL_HOME", raising=False)
+    monkeypatch.delenv("OGY_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("OGY_DB_PATH", str(tmp_path / "ogy.db"))
+
+    # 1. Shared mode injects OGY_ACTIVE=1 without overriding USERPROFILE/HOME
+    cfg_shared = load_config()
+    assert cfg_shared.profile_mode == "shared"
+    env_shared = build_agy_acp_env(cfg_shared, base_env={"PATH": "/usr/bin"})
+    assert env_shared["OGY_ACTIVE"] == "1"
+    assert env_shared["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+    assert "OGY_GEMINI_HOME" not in env_shared
+    assert "USERPROFILE" not in env_shared
+
+    # 2. Isolated mode injects OGY_ACTIVE=1 + isolated USERPROFILE/HOME + real OGY_DB_PATH/OGY_CONFIG_PATH
+    cfg_iso = load_config()
+    cfg_iso.profile_mode = "isolated"
+    iso_root = tmp_path / ".local" / "share" / "optigravity" / "gemini-profile"
+    cfg_iso.isolated_profile_root = iso_root
+    cfg_iso.gemini_home = iso_root / ".gemini"
+    env_iso = build_agy_acp_env(cfg_iso, base_env={"PATH": "/usr/bin"})
+    assert env_iso["OGY_ACTIVE"] == "1"
+    assert env_iso["USERPROFILE"] == str(iso_root)
+    assert env_iso["HOME"] == str(iso_root)
+    assert env_iso["OGY_GEMINI_HOME"] == str(iso_root / ".gemini")
+    assert env_iso["OGY_DB_PATH"] == str(cfg_iso.db_path)
+    assert env_iso["OGY_CONFIG_PATH"] == str(cfg_iso.config_path)
+    assert env_iso["OGY_REAL_HOME"] == str(tmp_path)
+
+    # 3. command_override (V3.5 prep) spawns custom executable with full V3.1 env
+    captured: dict[str, Any] = {}
+    fake = FakeAgentConn()
+
+    class _FakeSpawnCM:
+        async def __aenter__(self) -> tuple[Any, Any]:
+            return fake, SimpleNamespace(returncode=0)
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    def _fake_spawn(bridge: Any, cmd: str, *args: str, **kwargs: Any) -> _FakeSpawnCM:
+        captured["cmd"] = cmd
+        captured["args"] = list(args)
+        captured["env"] = kwargs.get("env")
+        return _FakeSpawnCM()
+
+    monkeypatch.setattr(acp, "spawn_agent_process", _fake_spawn)
+
+    client = AcpClient(
+        AcpClientConfig(
+            cwd=str(tmp_path),
+            command_override=["python", "-m", "fake_acp_agent", "--scenario", "v31_env_audit"],
+        ),
+        ogy_config=cfg_iso,
+    )
+
+    async def _run_override() -> None:
+        await client.connect()
+        await client.close()
+
+    asyncio.run(_run_override())
+    assert captured["cmd"] == "python"
+    assert captured["args"][:4] == ["-m", "fake_acp_agent", "--scenario", "v31_env_audit"]
+    assert "--settings" in captured["args"]
+    assert str(iso_root / ".gemini" / "antigravity-cli" / "settings.json") in captured["args"]
+    assert captured["env"]["OGY_ACTIVE"] == "1"
+    assert captured["env"]["USERPROFILE"] == str(iso_root)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 (Lot 3.5.1): Real stdio JSON-RPC 2.0 tests via Fake ACP Agent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fake_acp_stdio_nominal_stream_and_db_persistence(tmp_path: Path) -> None:
+    """Real stdio JSON-RPC 2.0 round-trip: thought -> grouped tools -> chunks -> Usage -> SQLite."""
+    from tests.conftest import fake_acp_command
+    from ogy_frontends.acp_tui.client import AgentMessageEvent, AgentThoughtEvent, ToolCallEvent
+
+    ogy_cfg = load_config()
+    events: list[Any] = []
+    client = AcpClient(
+        AcpClientConfig(cwd=str(tmp_path), command_override=fake_acp_command("nominal_stream")),
+        ogy_config=ogy_cfg,
+        on_event=events.append,
+    )
+    try:
+        caps = await client.connect()
+        assert caps
+        sid = await client.new_session()
+        assert sid == "fake-acp-1"
+        resp = await client.send_prompt("Verify V3.1 contracts")
+        assert resp.stop_reason == "end_turn"
+    finally:
+        await client.close()
+
+    assert any(isinstance(e, AgentThoughtEvent) and "Inspecting" in e.text for e in events)
+    assert any(isinstance(e, ToolCallEvent) and e.name == "read_file" and e.status == "completed" for e in events)
+    assert any(isinstance(e, ToolCallEvent) and e.name == "grep_search" and e.status == "completed" for e in events)
+    full_msg = "".join(e.text for e in events if isinstance(e, AgentMessageEvent))
+    assert "Analysis complete." in full_msg
+    assert any(isinstance(e, UsageEvent) and e.is_turn_final and e.thought_tokens == 420 for e in events)
+
+    conn = connect(ogy_cfg.db_path, init_schema=True)
+    try:
+        rows = query_all(conn, "SELECT * FROM turns WHERE session_id = 'fake-acp-1'")
+        assert len(rows) == 1
+        assert rows[0]["data_source"] == "acp"
+        assert rows[0]["thinking_tokens"] == 420
+        assert rows[0]["cache_read_tokens"] == 8800
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_fake_acp_stdio_edit_diff_and_permission_roundtrip(tmp_path: Path) -> None:
+    """Real stdio edit diff + request_permission suspension until client resolves future."""
+    from tests.conftest import fake_acp_command
+    from ogy_frontends.acp_tui.client import AgentMessageEvent
+
+    seen_perm: list[PermissionRequestEvent] = []
+    messages: list[str] = []
+
+    async def _on_event(ev: Any) -> None:
+        if isinstance(ev, PermissionRequestEvent):
+            seen_perm.append(ev)
+            ev.future.set_result("allow_always")
+        elif isinstance(ev, AgentMessageEvent):
+            messages.append(ev.text)
+
+    client = AcpClient(
+        AcpClientConfig(cwd=str(tmp_path), command_override=fake_acp_command("edit_with_diff_and_permission")),
+        ogy_config=load_config(),
+        on_event=_on_event,
+    )
+    try:
+        await client.connect()
+        await client.new_session()
+        await client.send_prompt("Apply edit")
+    finally:
+        await client.close()
+
+    assert len(seen_perm) == 1
+    assert any(blk.get("type") == "diff" and blk.get("path") == "app.py" for blk in seen_perm[0].content)
+    assert "PERMISSION_DECISION:allow_always" in "".join(messages)
+
+
+@pytest.mark.asyncio
+async def test_fake_acp_stdio_elicitation_and_banned_yolo_mode(tmp_path: Path) -> None:
+    """Real stdio form + url elicitations and strict rejection of banned 'yolo' mode."""
+    import json
+    from tests.conftest import fake_acp_command
+    from ogy_frontends.acp_tui.client import AgentMessageEvent, ElicitationRequestEvent
+
+    messages: list[str] = []
+    seen_modes: list[str] = []
+
+    async def _on_event(ev: Any) -> None:
+        if isinstance(ev, ElicitationRequestEvent):
+            seen_modes.append(ev.mode)
+            if ev.mode == "form":
+                ev.future.set_result({"action": "accept", "content": {"env": "prod", "dry_run": False}})
+            else:
+                ev.future.set_result({"action": "accept", "content": {}})
+        elif isinstance(ev, AgentMessageEvent):
+            messages.append(ev.text)
+
+    client = AcpClient(
+        AcpClientConfig(cwd=str(tmp_path), command_override=fake_acp_command("elicitation_and_tos")),
+        ogy_config=load_config(),
+        on_event=_on_event,
+    )
+    try:
+        await client.connect()
+        await client.new_session()
+        with pytest.raises(ValueError, match="Unsupported or banned ACP mode"):
+            await client.set_config_option("mode", "yolo")
+        await client.send_prompt("Run elicitation")
+    finally:
+        await client.close()
+
+    assert seen_modes == ["form", "url"]
+    full = "".join(messages)
+    assert "ELICITATION_RESULT:" in full
+    payload = json.loads(full.split("ELICITATION_RESULT:", 1)[1])
+    assert payload == {"form_action": "accept", "form_content": {"dry_run": False, "env": "prod"}, "url_action": "accept"}
+
+
+@pytest.mark.asyncio
+async def test_fake_acp_stdio_faults_and_cancel(tmp_path: Path) -> None:
+    """Real stdio session/cancel interrupts a slow turn without killing the subprocess."""
+    from tests.conftest import fake_acp_command
+    from ogy_frontends.acp_tui.client import AgentMessageEvent, AgentThoughtEvent
+
+    thought_seen = asyncio.Event()
+    messages: list[str] = []
+
+    async def _on_event(ev: Any) -> None:
+        if isinstance(ev, AgentThoughtEvent):
+            thought_seen.set()
+        elif isinstance(ev, AgentMessageEvent):
+            messages.append(ev.text)
+
+    client = AcpClient(
+        AcpClientConfig(cwd=str(tmp_path), command_override=fake_acp_command("faults_and_cancel")),
+        ogy_config=load_config(),
+        on_event=_on_event,
+    )
+    try:
+        await client.connect()
+        await client.new_session()
+        prompt_task = asyncio.create_task(client.send_prompt("please run slow task"))
+        await asyncio.wait_for(thought_seen.wait(), timeout=5.0)
+        await client.cancel_turn()
+        resp = await asyncio.wait_for(prompt_task, timeout=5.0)
+        assert resp.stop_reason == "cancelled"
+        assert "TURN_CANCELLED_CLEANLY" in "".join(messages)
+        # Process is still alive for subsequent turns
+        resp2 = await client.send_prompt("ping")
+        assert resp2.stop_reason == "end_turn"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile_mode", ["shared", "isolated"])
+async def test_fake_acp_stdio_v31_env_audit(tmp_path: Path, profile_mode: str) -> None:
+    """V3.1 env & --settings audit over real stdio in both 'shared' and 'isolated' modes."""
+    import json
+    from tests.conftest import fake_acp_command
+    from ogy_frontends.acp_tui.client import AgentMessageEvent
+
+    ogy_cfg = load_config()
+    if profile_mode == "isolated":
+        ogy_cfg.profile_mode = "isolated"
+        iso_root = ogy_cfg.isolated_profile_root
+        assert iso_root is not None
+        ogy_cfg.gemini_home = iso_root / ".gemini"
+        ogy_cfg.agy_cli_dir = ogy_cfg.gemini_home / "antigravity-cli"
+        ogy_cfg.agy_config_dir = ogy_cfg.gemini_home / "config"
+
+    messages: list[str] = []
+    client = AcpClient(
+        AcpClientConfig(cwd=str(tmp_path), command_override=fake_acp_command("v31_env_audit")),
+        ogy_config=ogy_cfg,
+        on_event=lambda ev: messages.append(ev.text) if isinstance(ev, AgentMessageEvent) else None,
+    )
+    try:
+        await client.connect()
+        await client.new_session()
+        await client.send_prompt("audit")
+    finally:
+        await client.close()
+
+    report = json.loads("".join(messages))
+    assert report["OGY_ACTIVE"] == "1"
+    assert report["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+
+    if profile_mode == "isolated":
+        assert report["has_settings_flag"] is True
+        assert report["settings_arg"] == str(ogy_cfg.agy_cli_dir / "settings.json")
+        assert report["OGY_GEMINI_HOME"] == str(ogy_cfg.gemini_home)
+        assert report["USERPROFILE"] == str(ogy_cfg.isolated_profile_root)
+        assert report["HOME"] == str(ogy_cfg.isolated_profile_root)
+    else:
+        assert report["has_settings_flag"] is False
+        assert report["settings_arg"] is None
+        assert report["OGY_GEMINI_HOME"] is None

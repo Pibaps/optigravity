@@ -839,3 +839,165 @@ def test_resume_existing_session_restores_history_via_acp_load_and_local_cache(
 
     asyncio.run(_run_local_cache())
 
+
+# ---------------------------------------------------------------------------
+# Phase 1 (Lot 3.5.1): Textual Pilot + Fake ACP Agent stdio & Regression Locks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_pilot_real_fake_acp_nominal_stream(make_tui_app) -> None:
+    """Full TUI Pilot flow against real stdio Fake ACP Agent (0 asyncio.sleep)."""
+    app = make_tui_app(scenario="nominal_stream", lang="en")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.client.active_session_id == "fake-acp-1"
+
+        inp = app.query_one("#prompt-input", PromptTextArea)
+        inp.value = "Audit V3.1 contracts"
+        await inp.action_submit()
+        # Wait deterministically for the in-flight prompt task & SQLite worker
+        for _ in range(40):
+            await pilot.pause()
+            if not app._inflight_tasks:
+                break
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        tr = app.get_active_transcript()
+        assert tr is not None
+        assert list(tr.query(ThoughtBlock))
+        assert list(tr.query(ActivityGroup))
+        msgs = list(tr.query(AssistantMessage))
+        assert any("Analysis complete." in m.raw_markdown for m in msgs)
+
+        tel = app.query_one("#telemetry-panel", TelemetryPanel)
+        assert "420" in str(tel.query_one("#tel-thought").render())
+
+
+@pytest.mark.asyncio
+async def test_tui_pilot_real_fake_acp_permission_modal_with_diff(make_tui_app) -> None:
+    """Full TUI Pilot flow: Fake ACP Agent suspends on request_permission -> 'f' preview -> 'y' approves."""
+    app = make_tui_app(scenario="edit_with_diff_and_permission", lang="en")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        inp = app.query_one("#prompt-input", PromptTextArea)
+        inp.value = "Edit app.py"
+        await inp.action_submit()
+
+        for _ in range(40):
+            await pilot.pause()
+            if isinstance(app.screen, PermissionModal):
+                break
+        assert isinstance(app.screen, PermissionModal)
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert isinstance(app.screen, DiffPreviewModal)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, PermissionModal)
+
+        await pilot.press("y")
+        for _ in range(40):
+            await pilot.pause()
+            if not app._inflight_tasks:
+                break
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        tr = app.get_active_transcript()
+        assert tr is not None
+        assert any("PERMISSION_DECISION:allow_once" in m.raw_markdown for m in tr.query(AssistantMessage))
+
+
+@pytest.mark.asyncio
+async def test_tui_pilot_streaming_anchor_release_and_reanchor_pr6694(make_tui_app) -> None:
+    """Regression lock (Textual PR #6694): streaming + scroll up releases anchor & freezes scroll_y."""
+    fake = FakeAgentConn()
+    app = make_tui_app(injected_agent_conn=fake, lang="en")
+    async with app.run_test(size=(100, 24)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        tr = app.get_active_transcript()
+        assert tr is not None
+        assert tr.is_anchored is True
+
+        # Stream enough content to overflow the viewport
+        for i in range(45):
+            await app._on_acp_event(AgentMessageEvent("acp-sess-1", f"Streamed paragraph line {i}\n"))
+        await pilot.pause()
+        assert tr.max_scroll_y > 0
+
+        # User scrolls up -> anchor is released and scroll_y stays frozen on subsequent chunks
+        tr.scroll_relative(y=-5, animate=False)
+        tr.detach_anchor()
+        await pilot.pause()
+        frozen_y = tr.scroll_y
+        assert tr.is_anchored is False
+
+        for i in range(45, 55):
+            await app._on_acp_event(AgentMessageEvent("acp-sess-1", f"New arriving chunk {i}\n"))
+        await pilot.pause()
+
+        pill = app.query_one("#new-messages-pill", Button)
+        assert pill.has_class("visible")
+        assert tr.is_anchored is False
+        assert tr.scroll_y == frozen_y
+
+        # End / pin_to_bottom re-engages anchor and hides the pill
+        tr.pin_to_bottom()
+        await pilot.pause()
+        assert tr.is_anchored is True
+        assert not pill.has_class("visible")
+
+
+@pytest.mark.asyncio
+async def test_tui_pilot_paste_collapse_lines_and_chars_via_events_paste(make_tui_app) -> None:
+    """Regression lock: posting events.Paste (>= 8 lines or >= 600 chars) collapses into chip & expands on submit."""
+    fake = FakeAgentConn()
+    app = make_tui_app(injected_agent_conn=fake, lang="en")
+    async with app.run_test(size=(100, 24)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        inp = app.query_one("#prompt-input", PromptTextArea)
+        inp.focus()
+
+        # Case A: >= 8 lines
+        ten_lines = "\n".join(f"row_{i}" for i in range(1, 11))
+        inp.post_message(events.Paste(ten_lines))
+        await pilot.pause()
+        assert "[Pasted #1 · 10 lines]" in inp.value
+        assert "row_10" not in inp.value
+
+        await inp.action_submit()
+        for _ in range(20):
+            await pilot.pause()
+            if not app._inflight_tasks:
+                break
+        await app.workers.wait_for_complete()
+        prompt_calls = [args for name, args in fake.calls if name == "prompt"]
+        assert prompt_calls and "row_1" in prompt_calls[-1]["prompt"][0].text and "row_10" in prompt_calls[-1]["prompt"][0].text
+
+        # Case B: single long line >= 600 chars
+        long_single = "A" * 650
+        inp.post_message(events.Paste(long_single))
+        await pilot.pause()
+        assert "[Pasted #" in inp.value
+        assert "A" * 650 not in inp.value
+
+        await inp.action_submit()
+        for _ in range(20):
+            await pilot.pause()
+            if not app._inflight_tasks:
+                break
+        await app.workers.wait_for_complete()
+        prompt_calls = [args for name, args in fake.calls if name == "prompt"]
+        assert long_single in prompt_calls[-1]["prompt"][0].text
+
+

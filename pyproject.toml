@@ -27,7 +27,19 @@ all = [
 ]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio",
+    "pytest-asyncio>=0.24",
+    "pytest-textual-snapshot>=1.1.0",
+    "time-machine>=2.15",
+    "inline-snapshot>=0.14",
+    "dirty-equals>=0.8",
+    "syrupy>=4.8",
+    "pytest-xdist>=3.6",
+    "pytest-timeout>=2.3",
+    "pytest-cov>=5.0",
+    "diff-cover>=9.2",
+    "pytest-testmon>=2.1",
+    "pywinpty>=2.0; sys_platform == 'win32'",
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]
@@ -53,3 +65,20 @@ packages = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"
+markers = [
+    "snapshot: Visual SVG snapshot tests via pytest-textual-snapshot (authoritative on ubuntu-latest).",
+    "e2e_tty: Real terminal PTY/ConPTY end-to-end smoke tests.",
+]
+
+[tool.mutmut]
+paths_to_mutate = [
+    "ogy_core/firebreaks.py",
+    "ogy_core/router.py",
+    "ogy_core/pricing.py",
+    "ogy_core/context_health.py",
+    "ogy_core/profile.py",
+    "ogy_hooks/cli.py",
+]
+mutate_only_covered_lines = true
+max_stack_depth = 8

@@ -852,3 +852,212 @@ def test_v1_hot_path_remains_100_percent_stdlib() -> None:
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     top = node.module.split(".")[0]
                     assert top not in forbidden_roots, f"{py_file} imports forbidden {node.module}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (Lot 3.5.3): Real `google.genai.errors` & `types.Part` thought_signature harness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_genai_sdk_real_client_error_429_402_400_and_server_error_5xx() -> None:
+    """Exercise ResilientGeminiRouter against real `google.genai.errors.ClientError` & `ServerError`."""
+    from google.genai import errors as genai_errors
+
+    def _ok_result(text: str = "ok") -> Any:
+        from ogy_subagents.gemini_client import SubagentLoopResult, UsageAccumulator
+
+        return SubagentLoopResult(
+            text=text,
+            steps_taken=1,
+            max_steps=1,
+            usage=UsageAccumulator(prompt_token_count=50, candidates_token_count=10),
+        )
+
+    # 1. 429 RPD on Project A (free) -> immediate circuit-breaker & fallback to Project B (tier1)
+    rpd_err = genai_errors.ClientError(
+        429,
+        {"error": {"code": 429, "message": "Quota exceeded for GenerateRequestsPerDayPerProjectPerModel-FreeTier"}},
+    )
+    assert classify_api_error(rpd_err) == "rpd"
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(sec: float) -> None:
+        sleeps.append(sec)
+
+    now_t = [1000.0]
+    router_rpd = ResilientGeminiRouter(
+        privacy_mode="free_first",
+        fallback_to_tier1=True,
+        client_factory=lambda key: key,
+        secret_resolver=lambda tier: SecretResolution(
+            key=FAKE_KEY_FREE if tier == "free" else FAKE_KEY_TIER1,
+            source=f"env:{tier}",
+            tier=tier,
+        ),
+        sleep_fn=_fake_sleep,
+        clock_fn=lambda: now_t[0],
+        jitter_fn=lambda: 0.0,
+    )
+
+    tiers_called: list[str] = []
+
+    async def _runner_rpd(_client: Any, tier: str) -> Any:
+        tiers_called.append(tier)
+        if tier == "free":
+            raise rpd_err
+        return _ok_result("tier1-fallback-ok")
+
+    routed = await router_rpd.execute(model_id="gemini-3.5-flash-lite", runner=_runner_rpd)
+    assert tiers_called == ["free", "tier1"]
+    assert routed.tier == "tier1"
+    assert routed.billing_source == "gemini_api_tier1"
+    assert routed.fallback_notice is not None
+    assert router_rpd.is_in_cooldown("free") is True
+
+    # 2. 429 RPM/TPM -> exponential backoff retries before succeeding
+    rpm_err = genai_errors.ClientError(
+        429,
+        {"error": {"code": 429, "message": "Rate limit exceeded: RequestsPerMinute"}},
+    )
+    assert classify_api_error(rpm_err) == "rpm_tpm"
+
+    rpm_sleeps: list[float] = []
+
+    async def _rpm_sleep(sec: float) -> None:
+        rpm_sleeps.append(sec)
+
+    router_rpm = ResilientGeminiRouter(
+        privacy_mode="tier1_only",
+        client_factory=lambda key: key,
+        secret_resolver=lambda tier: SecretResolution(key=FAKE_KEY_TIER1, source="env:tier1", tier=tier),
+        sleep_fn=_rpm_sleep,
+        clock_fn=lambda: now_t[0],
+        jitter_fn=lambda: 0.0,
+    )
+    attempts = [0]
+
+    async def _runner_rpm(_client: Any, _tier: str) -> Any:
+        attempts[0] += 1
+        if attempts[0] < 3:
+            raise rpm_err
+        return _ok_result("recovered-after-rpm-backoff")
+
+    res_rpm = await router_rpm.execute(model_id="gemini-3.5-flash-lite", runner=_runner_rpm)
+    assert res_rpm.result.text == "recovered-after-rpm-backoff"
+    assert rpm_sleeps == [1.5, 4.0]
+
+    # 3. Ambiguous 429 -> 15 min cooldown (900s)
+    amb_err = genai_errors.ClientError(
+        429,
+        {"error": {"code": 429, "message": "RESOURCE_EXHAUSTED"}},
+    )
+    assert classify_api_error(amb_err) == "rpd_ambiguous"
+
+    router_amb = ResilientGeminiRouter(
+        privacy_mode="free_first",
+        fallback_to_tier1=False,
+        client_factory=lambda key: key,
+        secret_resolver=lambda tier: SecretResolution(key=FAKE_KEY_FREE, source="env:free", tier=tier),
+        sleep_fn=_fake_sleep,
+        clock_fn=lambda: now_t[0],
+    )
+    with pytest.raises(SubagentQuotaExhaustedError):
+        await router_amb.execute(model_id="gemini-3.5-flash-lite", runner=lambda _c, _t: (_ for _ in ()).throw(amb_err))
+    assert 895.0 <= router_amb.cooldown_remaining_s("free") <= 900.0
+
+    # 4. 402 Payment Required -> immediate SubagentBillingError (no retry)
+    err_402 = genai_errors.ClientError(
+        402,
+        {"error": {"code": 402, "message": "Payment Required: insufficient balance on billing account"}},
+    )
+    assert classify_api_error(err_402) == "billing_402"
+
+    router_402 = ResilientGeminiRouter(
+        privacy_mode="tier1_only",
+        client_factory=lambda key: key,
+        secret_resolver=lambda tier: SecretResolution(key=FAKE_KEY_TIER1, source="env:tier1", tier=tier),
+        sleep_fn=_fake_sleep,
+        clock_fn=lambda: now_t[0],
+    )
+    with pytest.raises(SubagentBillingError):
+        await router_402.execute(model_id="gemini-3.5-flash-lite", runner=lambda _c, _t: (_ for _ in ()).throw(err_402))
+
+    # 5. 400 ClientError and 503 ServerError classify as 'other' and propagate cleanly
+    err_400 = genai_errors.ClientError(400, {"error": {"code": 400, "message": "INVALID_ARGUMENT"}})
+    err_503 = genai_errors.ServerError(503, {"error": {"code": 503, "message": "Service Unavailable"}})
+    assert classify_api_error(err_400) == "other"
+    assert classify_api_error(err_503) == "other"
+
+
+@pytest.mark.asyncio
+async def test_genai_sdk_real_types_part_thought_signature_preserved_in_level2_loop(tmp_path: Path) -> None:
+    """Real `google.genai.types.Part` with `thought_signature` is preserved verbatim across Level 2 turns."""
+    from google.genai import types
+
+    (tmp_path / "calc.py").write_text("def double(x):\n    return x * 2\n", encoding="utf-8")
+
+    sig_bytes = b"\xde\xad\xbe\xef-thought-sig-turn1"
+    turn1_content = types.Content(
+        role="model",
+        parts=[
+            types.Part(text="I should read calc.py first.", thought=True, thought_signature=sig_bytes),
+            types.Part(
+                function_call=types.FunctionCall(
+                    name="read_slice",
+                    args={"path": "calc.py", "start_line": 1, "end_line": 10},
+                )
+            ),
+        ],
+    )
+    turn2_content = types.Content(
+        role="model",
+        parts=[types.Part(text="`double(x)` is defined in `calc.py:1` and returns `x * 2`.")],
+    )
+
+    resp1 = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=turn1_content)],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=120,
+            candidates_token_count=25,
+            thoughts_token_count=40,
+        ),
+    )
+    resp2 = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=turn2_content)],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=210,
+            candidates_token_count=30,
+            thoughts_token_count=15,
+        ),
+    )
+
+    fake_client = FakeGenaiClient([resp1, resp2])
+    res = await run_agentic_loop(
+        fake_client,
+        model_id="gemini-3.5-flash-lite",
+        prompt="Where is double defined?",
+        system_instruction="Be concise and cite file:line.",
+        tool_declarations=[],
+        tool_dispatcher={"read_slice": lambda a: read_slice(tmp_path, a["path"], start_line=a["start_line"], end_line=a["end_line"])},
+        thinking_level="low",
+        max_steps=8,
+        timeout_s=10.0,
+        use_sdk_types=True,
+    )
+
+    assert res.stopped_reason == "completed"
+    assert res.steps_taken == 2
+    assert "calc.py:1" in res.text
+    assert res.usage.thoughts_token_count == 55
+
+    # Verify exact SDK Content & Part.thought_signature were retransmitted on turn 2
+    turn2_contents = fake_client.models_aio.calls[1]["contents"]
+    assert turn2_contents[1] is turn1_content
+    assert turn2_contents[1].parts[0].thought_signature == sig_bytes
+    # Verify store=False in SDK config when supported
+    cfg_sent = fake_client.models_aio.calls[0]["config"]
+    if hasattr(cfg_sent, "store") and cfg_sent.store is not None:
+        assert cfg_sent.store is False
+

@@ -175,8 +175,23 @@ def run_tui(
     model: str | None = None,
     effort: str | None = None,
     lang: str = "fr",
+    command_override: list[str] | None = None,
 ) -> int:
     """Launch the Optigravity Textual TUI."""
+    import json
+    import os
+
+    resolved_override = command_override
+    if resolved_override is None:
+        raw_override = os.environ.get("OGY_ACP_COMMAND_OVERRIDE", "").strip()
+        if raw_override:
+            try:
+                parsed = json.loads(raw_override)
+                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed) and parsed:
+                    resolved_override = parsed
+            except json.JSONDecodeError:
+                pass
+
     cfg = AcpClientConfig(
         cwd=str(Path(cwd).resolve()),
         sandbox=sandbox,
@@ -184,6 +199,7 @@ def run_tui(
         agent=agent,
         log_file=log_file,
         auth_method=auth_method,
+        command_override=resolved_override,
     )
     app = OptigravityApp(
         client_config=cfg,

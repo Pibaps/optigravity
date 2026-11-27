@@ -205,3 +205,137 @@ def test_cli_lifecycle_init_doctor_config_uninstall_and_version(monkeypatch, tmp
         ogy_main(["--version"])
     assert exc.value.code == 0
     assert get_version() in capsys.readouterr().out
+
+
+def test_v31_backup_and_restore_byte_for_byte(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Lot 3.1.2: full timestamped .gemini backup/restore restores pre-existing files byte-for-byte and removes added files."""
+    _, cli_dir, cfg_dir = _patch_env_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("OGY_GEMINI_HOME", raising=False)
+    monkeypatch.delenv("OGY_REAL_HOME", raising=False)
+    monkeypatch.delenv("OGY_CONFIG_PATH", raising=False)
+
+    orig_settings_bytes = b'{\n  "theme": "gruvbox",\n  "fontSize": 14\n}\n'
+    orig_mcp_bytes = b'{\n  "mcpServers": {\n    "user_srv": {"command": "uvx"}\n  }\n}\n'
+    orig_rule_bytes = b"# User Custom Rule\nAlways keep diffs small.\n"
+
+    (cli_dir / "settings.json").write_bytes(orig_settings_bytes)
+    (cfg_dir / "mcp_config.json").write_bytes(orig_mcp_bytes)
+    (cfg_dir / "rules").mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "rules" / "user-custom.md").write_bytes(orig_rule_bytes)
+    assert not (cfg_dir / "hooks.json").exists()
+
+    # 1. Shared init creates a full snapshot before modifying anything
+    assert ogy_main(["init", "--non-interactive", "--shared", "--enable-firebreaks"]) == 0
+    init_out = capsys.readouterr().out
+    assert "snapshot=" in init_out
+
+    backups_dir = tmp_path / ".local" / "share" / "optigravity" / "backups"
+    snaps = [p for p in backups_dir.iterdir() if p.is_dir()]
+    assert len(snaps) == 1
+    manifest = json.loads((snaps[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["files"]["antigravity-cli/settings.json"]["existed"] is True
+    assert manifest["files"]["config/hooks.json"]["existed"] is False
+    assert manifest["files"]["config/rules/user-custom.md"]["existed"] is True
+
+    # 2. Manual backup captures post-init state, then second manual backup deduplicates
+    assert ogy_main(["backup"]) == 0
+    b1_out = capsys.readouterr().out
+    assert "Created backup" in b1_out
+
+    assert ogy_main(["backup"]) == 0
+    b2_out = capsys.readouterr().out
+    assert "No changes since latest backup" in b2_out
+
+    assert ogy_main(["backup", "--list"]) == 0
+    list_out = capsys.readouterr().out
+    assert manifest["snapshot_id"] in list_out
+
+    # 3. Restore --dry-run does not modify files
+    assert ogy_main(["restore", manifest["snapshot_id"], "--dry-run"]) == 0
+    dry_out = capsys.readouterr().out
+    assert "[dry-run]" in dry_out
+    assert (cfg_dir / "hooks.json").is_file()
+
+    # 4. Restore initial snapshot restores byte-for-byte & deletes files added by ogy init
+    assert ogy_main(["restore", manifest["snapshot_id"]]) == 0
+    capsys.readouterr()
+    assert (cli_dir / "settings.json").read_bytes() == orig_settings_bytes
+    assert (cfg_dir / "mcp_config.json").read_bytes() == orig_mcp_bytes
+    assert (cfg_dir / "rules" / "user-custom.md").read_bytes() == orig_rule_bytes
+    assert not (cfg_dir / "hooks.json").exists()
+    assert not (cfg_dir / "rules" / "ogy-hygiene.md").exists()
+    assert not (cfg_dir / "skills" / "ogy-budget" / "SKILL.md").exists()
+
+    # 5. Re-init and verify `ogy uninstall --restore-backups` uses the initial snapshot
+    assert ogy_main(["init", "--non-interactive", "--shared"]) == 0
+    assert (cfg_dir / "hooks.json").is_file()
+    assert ogy_main(["uninstall", "--restore-backups"]) == 0
+    uninst_out = capsys.readouterr().out
+    assert "Restore initial snapshot" in uninst_out
+    assert (cli_dir / "settings.json").read_bytes() == orig_settings_bytes
+    assert not (cfg_dir / "hooks.json").exists()
+
+
+def test_v31_isolated_profile_doctor_and_run_dry_run(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Lot 3.1.3: `ogy init --isolated` keeps ~/.gemini 100% untouched, links OAuth, and configures --settings."""
+    _, cli_dir, cfg_dir = _patch_env_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("OGY_GEMINI_HOME", raising=False)
+    monkeypatch.delenv("OGY_REAL_HOME", raising=False)
+    monkeypatch.delenv("OGY_CONFIG_PATH", raising=False)
+
+    shared_gemini = tmp_path / ".gemini"
+    orig_settings_bytes = b'{"theme": "native-untouched"}\n'
+    (cli_dir / "settings.json").write_bytes(orig_settings_bytes)
+    (shared_gemini / "oauth_creds.json").write_text('{"access_token": "fake-token"}\n', encoding="utf-8")
+    (shared_gemini / "google_accounts.json").write_text('{"active": "dev@example.com"}\n', encoding="utf-8")
+
+    # 1. Init in isolated mode
+    assert ogy_main(["init", "--non-interactive", "--isolated", "--enable-firebreaks"]) == 0
+    init_out = capsys.readouterr().out
+    assert "isolated profile" in init_out
+
+    # Shared ~/.gemini must remain 100% untouched
+    assert (cli_dir / "settings.json").read_bytes() == orig_settings_bytes
+    assert not (cfg_dir / "hooks.json").exists()
+    assert not (cfg_dir / "mcp_config.json").exists()
+    assert not (cfg_dir / "rules" / "ogy-hygiene.md").exists()
+
+    # Isolated profile must have all managed files + linked OAuth files
+    iso_gemini = tmp_path / ".local" / "share" / "optigravity" / "gemini-profile" / ".gemini"
+    assert (iso_gemini / "antigravity-cli" / "settings.json").is_file()
+    assert (iso_gemini / "config" / "hooks.json").is_file()
+    assert (iso_gemini / "config" / "mcp_config.json").is_file()
+    assert (iso_gemini / "config" / "rules" / "ogy-hygiene.md").is_file()
+    assert (iso_gemini / "config" / "skills" / "ogy-budget" / "SKILL.md").is_file()
+    assert (iso_gemini / "oauth_creds.json").is_file()
+    assert (iso_gemini / "google_accounts.json").is_file()
+
+    # 2. `ogy run --dry-run` passes --settings pointing to isolated settings.json
+    assert ogy_main(["run", "--dry-run", "fix race condition deadlock"]) == 0
+    run_out = capsys.readouterr().out
+    assert "--settings" in run_out
+    assert "gemini-profile" in run_out
+
+    # 3. `ogy doctor` reports isolated mode, OAuth links OK, and shared_clean OK
+    assert ogy_main(["doctor"]) == 0
+    doc_out = capsys.readouterr().out
+    assert "profile_mode: isolated" in doc_out
+    assert "oauth_links : OK" in doc_out
+    assert "shared_clean: OK" in doc_out
+
+    # 4. If a residue appears in shared ~/.gemini, `ogy doctor` flags it
+    (cfg_dir / "rules").mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "rules" / "ogy-hygiene.md").write_text("# leftover", encoding="utf-8")
+    assert ogy_main(["doctor"]) == 0
+    doc_warn = capsys.readouterr().out
+    assert "shared_clean: WARN" in doc_warn
+    assert "ogy-hygiene.md" in doc_warn
+
+    # 5. OGY_GEMINI_HOME env override is honored by load_config()
+    from ogy_core.config import load_config
+
+    custom_gemini = tmp_path / "custom-gemini"
+    monkeypatch.setenv("OGY_GEMINI_HOME", str(custom_gemini))
+    cfg_override = load_config()
+    assert cfg_override.agy_cli_dir == custom_gemini / "antigravity-cli"
+    assert cfg_override.agy_config_dir == custom_gemini / "config"

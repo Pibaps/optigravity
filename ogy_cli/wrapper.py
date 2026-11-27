@@ -13,6 +13,7 @@ from typing import Sequence
 
 from ogy_core.config import load_config
 from ogy_core.ingest import get_latest_quota_snapshots
+from ogy_core.profile import build_agy_subprocess_env
 from ogy_core.router import RouteDecision, route_stage1, route_stage2_bandit
 from ogy_core.storage import connect, write_pending_task, write_tx
 
@@ -46,10 +47,13 @@ def build_agy_args(
     prompt: str | None = None,
     headless: bool = False,
     sandbox: bool = False,
+    settings_path: Path | str | None = None,
     extra_args: Sequence[str] = (),
 ) -> list[str]:
-    """Build official agy CLI flags (never --settings, --permission-mode, or -m)."""
+    """Build official agy CLI flags (never --permission-mode or -m; supports --settings in isolated mode)."""
     args: list[str] = []
+    if settings_path:
+        args.extend(["--settings", str(settings_path)])
     if decision.model_id:
         args.extend(["--model", decision.model_id])
     if decision.effort and decision.model_id.lower() != "orchestrator":
@@ -123,18 +127,19 @@ def run_agy(
     finally:
         conn.close()
 
+    settings_path: Path | None = (
+        (cfg.agy_cli_dir / "settings.json") if cfg.profile_mode == "isolated" else None
+    )
     agy_args = build_agy_args(
         decision,
         prompt=prompt,
         headless=headless,
         sandbox=sandbox,
+        settings_path=settings_path,
         extra_args=extra_args,
     )
 
-    env = os.environ.copy()
-    env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
-    env["OGY_TASK_ID"] = task_id
-    env["OGY_SESSION_META"] = json.dumps(
+    session_meta = json.dumps(
         {
             "task_id": task_id,
             "stage": decision.stage,
@@ -142,8 +147,16 @@ def run_agy(
             "model": decision.model_id,
             "effort": decision.effort,
             "mode": decision.mode,
+            "profile_mode": cfg.profile_mode,
         },
         separators=(",", ":"),
+    )
+    env = build_agy_subprocess_env(
+        cfg,
+        extra_env={
+            "OGY_TASK_ID": task_id,
+            "OGY_SESSION_META": session_meta,
+        },
     )
 
     if dry_run:

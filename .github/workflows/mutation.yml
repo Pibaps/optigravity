@@ -1,0 +1,34 @@
+name: Weekly Mutation Testing (mutmut v3)
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutmut:
+    name: Mutmut v3 on Critical Modules (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies in non-editable mode (workaround mutmut#486)
+        run: |
+          uv sync --all-extras --no-editable
+          uv pip install "mutmut>=3.2"
+
+      - name: Run mutmut on critical V1/V3.1 modules
+        run: |
+          uv run mutmut run
+          uv run mutmut results

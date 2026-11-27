@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
-from ogy_cli.config_cmd import render_default_config_toml
+from ogy_cli.config_cmd import render_default_config_toml, set_config_value
 from ogy_core.config import load_config
+from ogy_core.profile import (
+    create_gemini_backup,
+    link_oauth_to_isolated_profile,
+    list_gemini_backups,
+    restore_gemini_backup,
+)
 
 MANAGED_KEY = "ogy-managed"
 _PLAINTEXT_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{35}")
@@ -91,6 +98,7 @@ def cmd_init(
     non_interactive: bool = False,
     language: str | None = None,
     privacy_mode: str | None = None,
+    profile_mode: str | None = None,
 ) -> int:
     """Guided, idempotent, reversible installation of hooks, statusLine, rules, skills, MCP & config.toml."""
     cfg = load_config()
@@ -105,24 +113,51 @@ def cmd_init(
     chosen_privacy = (privacy_mode or "tier1_only").lower()
     if chosen_privacy not in ("tier1_only", "free_first", "disabled"):
         chosen_privacy = "tier1_only"
+    chosen_profile = (profile_mode or cfg.profile_mode or "shared").lower()
+    if chosen_profile not in ("isolated", "shared"):
+        chosen_profile = "shared"
 
     if interactive:
-        print("── Optigravity Setup (4 steps) ──")
-        chosen_lang = _prompt_choice("1/4 Language (en/fr)", ("en", "fr"), chosen_lang)
-        fb_ans = _prompt_choice("2/4 Enable PreToolUse firebreaks (silent wrap + file limits)?", ("y", "n"), "y" if enable_firebreaks else "n")
+        print("── Optigravity Setup (5 steps) ──")
+        chosen_lang = _prompt_choice("1/5 Language (en/fr)", ("en", "fr"), chosen_lang)
+        chosen_profile = _prompt_choice(
+            "2/5 Profile mode (isolated=keeps ~/.gemini untouched, shared=writes into ~/.gemini)",
+            ("isolated", "shared"),
+            chosen_profile,
+        )
+        fb_ans = _prompt_choice(
+            "3/5 Enable PreToolUse firebreaks (silent wrap + file limits)?",
+            ("y", "n"),
+            "y" if enable_firebreaks else "n",
+        )
         chosen_firebreaks = fb_ans == "y"
         chosen_privacy = _prompt_choice(
-            "3/4 Subagents MCP privacy mode (tier1_only=private code safe, free_first=OSS, disabled)",
+            "4/5 Subagents MCP privacy mode (tier1_only=private code safe, free_first=OSS, disabled)",
             ("tier1_only", "free_first", "disabled"),
             chosen_privacy,
         )
-        print("4/4 Writing managed configs & commented config.toml...")
+        print("5/5 Writing managed configs & commented config.toml...")
 
-    settings_path = cfg.agy_cli_dir / "settings.json"
-    hooks_path = cfg.agy_config_dir / "hooks.json"
-    mcp_path = cfg.agy_config_dir / "mcp_config.json"
-    rule_dst = cfg.agy_config_dir / "rules" / "ogy-hygiene.md"
-    skill_dst = cfg.agy_config_dir / "skills" / "ogy-budget" / "SKILL.md"
+    shared_gemini_dir = cfg.shared_gemini_dir or (Path.home() / ".gemini")
+    isolated_root = cfg.isolated_profile_root or (Path.home() / ".local" / "share" / "optigravity" / "gemini-profile")
+    backups_dir = cfg.backups_dir or (Path.home() / ".local" / "share" / "optigravity" / "backups")
+
+    env_gemini = os.environ.get("OGY_GEMINI_HOME", "").strip()
+    if env_gemini:
+        target_gemini_dir = Path(env_gemini).expanduser()
+    elif chosen_profile == "isolated":
+        target_gemini_dir = isolated_root / ".gemini"
+    else:
+        target_gemini_dir = shared_gemini_dir
+
+    target_cli_dir = target_gemini_dir / "antigravity-cli"
+    target_cfg_dir = target_gemini_dir / "config"
+
+    settings_path = target_cli_dir / "settings.json"
+    hooks_path = target_cfg_dir / "hooks.json"
+    mcp_path = target_cfg_dir / "mcp_config.json"
+    rule_dst = target_cfg_dir / "rules" / "ogy-hygiene.md"
+    skill_dst = target_cfg_dir / "skills" / "ogy-budget" / "SKILL.md"
     config_toml_path = cfg.config_path
 
     # 1. settings.json (statusLine, tagged ogy-managed)
@@ -159,6 +194,11 @@ def cmd_init(
     mcp_data["mcpServers"] = servers
 
     if dry_run:
+        print(f"[dry-run] Profile mode: {chosen_profile}")
+        if chosen_profile == "isolated":
+            print(f"[dry-run] Would link OAuth credentials from {shared_gemini_dir.as_posix()} -> {target_gemini_dir.as_posix()}")
+        else:
+            print(f"[dry-run] Would snapshot {target_gemini_dir.as_posix()} into {backups_dir.as_posix()}")
         print(f"[dry-run] Would update {settings_path.as_posix()}")
         print(f"[dry-run] Would update {hooks_path.as_posix()}")
         print(f"[dry-run] Would update {mcp_path.as_posix()}")
@@ -167,13 +207,25 @@ def cmd_init(
         print(f"[dry-run] Would ensure {config_toml_path.as_posix()}")
         return 0
 
+    snap_info: dict[str, Any] | None = None
+    if chosen_profile == "shared":
+        snap_info = create_gemini_backup(
+            target_gemini_dir,
+            backups_dir,
+            profile_mode="shared",
+            reason="init",
+        )
+    else:
+        link_oauth_to_isolated_profile(shared_gemini_dir, target_gemini_dir)
+
     for path, payload in (
         (settings_path, settings_data),
         (hooks_path, hooks_data),
         (mcp_path, mcp_data),
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
-        _backup_once(path)
+        if chosen_profile == "shared":
+            _backup_once(path)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     rule_src = tpl / "ogy-hygiene.md"
@@ -192,11 +244,103 @@ def cmd_init(
                 language=chosen_lang,
                 overwrite_verified_ok=True,
                 privacy_mode=chosen_privacy,
+                isolate_hooks=cfg.isolate_hooks,
+                profile_mode=chosen_profile,
             ),
             encoding="utf-8",
         )
+    elif profile_mode is not None or chosen_profile != cfg.profile_mode:
+        set_config_value("general.profile_mode", chosen_profile, config_path=config_toml_path)
 
-    print("Optigravity installed (idempotent; original backups preserved as *.ogy.bak).")
+    if chosen_profile == "isolated":
+        print(
+            f"Optigravity installed in isolated profile ({target_gemini_dir.as_posix()}); "
+            f"{shared_gemini_dir.as_posix()} left untouched."
+        )
+    else:
+        snap_note = f"snapshot={snap_info['snapshot_id']}" if snap_info else "backups=*.ogy.bak"
+        print(f"Optigravity installed in shared mode (idempotent; {snap_note}, *.ogy.bak preserved).")
+    return 0
+
+
+def cmd_backup(*, list_only: bool = False) -> int:
+    """Create a full .gemini snapshot or list existing snapshots."""
+    cfg = load_config()
+    backups_dir = cfg.backups_dir or (Path.home() / ".local" / "share" / "optigravity" / "backups")
+
+    if list_only:
+        snaps = list_gemini_backups(backups_dir)
+        if not snaps:
+            print(f"No backups found in {backups_dir.as_posix()}.")
+            return 0
+        print(f"Backups in {backups_dir.as_posix()}:")
+        for s in snaps:
+            print(
+                f"  {s['snapshot_id']}  {s['created_at']}  mode={s['profile_mode']}  "
+                f"files={s['file_count']}  reason={s['reason']}"
+            )
+        return 0
+
+    env_gemini = os.environ.get("OGY_GEMINI_HOME", "").strip()
+    target_gemini_dir = (
+        Path(env_gemini).expanduser()
+        if env_gemini
+        else (cfg.shared_gemini_dir or (Path.home() / ".gemini"))
+    )
+    res = create_gemini_backup(
+        target_gemini_dir,
+        backups_dir,
+        profile_mode=cfg.profile_mode,
+        reason="manual",
+    )
+    if res["created"]:
+        print(
+            f"Created backup {res['snapshot_id']} ({res['file_count']} files) "
+            f"at {Path(res['path']).as_posix()}"
+        )
+    else:
+        print(
+            f"No changes since latest backup {res['snapshot_id']} ({res['file_count']} files)."
+        )
+    return 0
+
+
+def cmd_restore(
+    *,
+    snapshot_id: str | None = None,
+    latest: bool = False,
+    dry_run: bool = False,
+) -> int:
+    """Restore .gemini exactly to a saved snapshot."""
+    if not snapshot_id and not latest:
+        print("Usage: ogy restore [<snapshot_id> | --latest] [--dry-run]")
+        return 2
+
+    cfg = load_config()
+    backups_dir = cfg.backups_dir or (Path.home() / ".local" / "share" / "optigravity" / "backups")
+    env_gemini = os.environ.get("OGY_GEMINI_HOME", "").strip()
+    target_gemini_dir = (
+        Path(env_gemini).expanduser()
+        if env_gemini
+        else (cfg.shared_gemini_dir or (Path.home() / ".gemini"))
+    )
+
+    try:
+        res = restore_gemini_backup(
+            target_gemini_dir,
+            backups_dir,
+            snapshot_id=snapshot_id,
+            latest=latest,
+            dry_run=dry_run,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[ogy restore] {exc}", file=sys.stderr)
+        return 1
+
+    prefix = "[dry-run] " if dry_run else ""
+    print(f"{prefix}Restored snapshot {res['snapshot_id']} -> {target_gemini_dir.as_posix()}")
+    for act in res["actions"]:
+        print(f"{prefix}  {act}")
     return 0
 
 
@@ -278,20 +422,33 @@ def cmd_uninstall(
             except OSError:
                 pass
 
-    # 5. Optional backup restoration
+    # 5. Optional backup restoration (prefer full initial snapshot, fallback to *.ogy.bak)
+    backups_dir = cfg.backups_dir or (Path.home() / ".local" / "share" / "optigravity" / "backups")
+    shared_gemini_dir = cfg.shared_gemini_dir or (Path.home() / ".gemini")
+    snapshots = list_gemini_backups(backups_dir)
     available_baks = [
         p.with_suffix(p.suffix + ".ogy.bak")
         for p in (settings_path, hooks_path, mcp_path)
         if p.with_suffix(p.suffix + ".ogy.bak").is_file()
     ]
-    if restore_backups and available_baks:
-        for bak in available_baks:
-            orig = Path(str(bak)[: -len(".ogy.bak")])
-            actions.append(f"Restore {bak.as_posix()} -> {orig.as_posix()}")
-            if not dry_run:
-                shutil.copy2(bak, orig)
+    if restore_backups:
+        if snapshots:
+            res = restore_gemini_backup(
+                shared_gemini_dir,
+                backups_dir,
+                oldest=True,
+                dry_run=dry_run,
+            )
+            actions.append(f"Restore initial snapshot {res['snapshot_id']} -> {shared_gemini_dir.as_posix()}")
+            actions.extend(f"  {a}" for a in res["actions"])
+        elif available_baks:
+            for bak in available_baks:
+                orig = Path(str(bak)[: -len(".ogy.bak")])
+                actions.append(f"Restore {bak.as_posix()} -> {orig.as_posix()}")
+                if not dry_run:
+                    shutil.copy2(bak, orig)
 
-    # 6. Optional --purge-data (ogy.db, stash, pending_tasks, config.toml)
+    # 6. Optional --purge-data (ogy.db, stash, pending_tasks, isolated profile, config.toml)
     if purge_data:
         for suffix in ("", "-wal", "-shm"):
             db_file = Path(str(cfg.db_path) + suffix)
@@ -299,7 +456,10 @@ def cmd_uninstall(
                 actions.append(f"Purge {db_file.as_posix()}")
                 if not dry_run:
                     db_file.unlink(missing_ok=True)
-        for d in (cfg.stash_dir, cfg.stash_dir.parent / "pending_tasks"):
+        purge_dirs = [cfg.stash_dir, cfg.stash_dir.parent / "pending_tasks"]
+        if cfg.isolated_profile_root is not None:
+            purge_dirs.append(cfg.isolated_profile_root)
+        for d in purge_dirs:
             if d.is_dir():
                 actions.append(f"Purge directory {d.as_posix()}")
                 if not dry_run:
@@ -317,8 +477,11 @@ def cmd_uninstall(
             print(f"{prefix}{act}")
         if not purge_data:
             print(f"{prefix}Data preserved ({cfg.db_path}). Pass --purge-data to also delete DB/stash/config.")
-        if available_baks and not restore_backups:
-            print(f"{prefix}Backups available ({len(available_baks)} *.ogy.bak). Pass --restore-backups to restore them.")
+        if (snapshots or available_baks) and not restore_backups:
+            print(
+                f"{prefix}Backups available ({len(snapshots)} snapshot(s), {len(available_baks)} *.ogy.bak). "
+                "Pass --restore-backups to restore them."
+            )
     return 0
 
 

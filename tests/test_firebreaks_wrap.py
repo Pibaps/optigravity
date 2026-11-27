@@ -264,3 +264,26 @@ def test_lot13_small_passthrough_legacy_recall_and_lru_gc(tmp_path: Path, capsys
     # Subsequent non-forced GC within 1h is skipped
     skipped = gc_stash_dir(stash, max_age_days=0.0, max_total_bytes=0, force=False)
     assert skipped["removed_count"] == 0
+
+
+def test_v31_pre_tool_hook_respects_ogy_active_for_firebreaks(tmp_path: Path, monkeypatch) -> None:
+    """Lot 3.1.1: PreToolUse firebreaks only trigger when OGY_ACTIVE=1 (with default isolate_hooks=True)."""
+    from ogy_hooks.cli import dispatch_hook
+
+    cfg = _make_cfg(tmp_path, overwrite_ok=True)
+    payload = {
+        "conversationId": "sess-fb-guard",
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -v"}},
+    }
+
+    # Without OGY_ACTIVE -> immediate pass-through, no overwrite, no DB write
+    monkeypatch.delenv("OGY_ACTIVE", raising=False)
+    res_inactive = dispatch_hook("pre-tool", payload, cfg=cfg)
+    assert res_inactive == {"decision": "allow"}
+    assert not cfg.db_path.exists()
+
+    # With OGY_ACTIVE=1 -> firebreak rewrites command and records hook_event
+    monkeypatch.setenv("OGY_ACTIVE", "1")
+    res_active = dispatch_hook("pre-tool", payload, cfg=cfg)
+    assert res_active == {"decision": "allow", "overwrite": {"CommandLine": "ogy wrap -- pytest -v"}}
+    assert cfg.db_path.is_file()
