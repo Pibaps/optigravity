@@ -3,6 +3,8 @@
 **Optigravity (`ogy`)** is a token-efficiency, context-health, routing, telemetry, and hybrid subagent companion for **Google Antigravity CLI (`agy`)**.  
 It reduces billable token usage while preserving the native `agy` TUI, OAuth quotas, interactive workflows, and ToS Section 6 compliance.
 
+> Looking for architecture diagrams, SQLite schema, protocol internals, and developer guidelines? See the [Technical Reference (`README.technical.md`)](README.technical.md).
+
 ---
 
 ## Table of Contents
