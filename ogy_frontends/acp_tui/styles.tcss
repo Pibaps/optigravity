@@ -355,13 +355,17 @@ PromptComposer {
 TelemetryPanel {
     width: 36;
     border-left: solid #262e3d;
-    padding: 1 2;
+    padding: 1 0 1 2;
     background: #131720;
     height: 1fr;
     scrollbar-size: 1 1;
     scrollbar-color: #2a3344;
     scrollbar-color-hover: #485263;
     scrollbar-background: #131720;
+}
+
+TelemetryPanel > * {
+    padding-right: 2;
 }
 
 #telemetry-panel.hidden {
@@ -703,7 +707,11 @@ AssistantMessage .copy-code-btn:hover {
 
 TelemetryPanel.compact {
     width: 30;
-    padding: 1 1;
+    padding: 1 0 1 1;
+}
+
+TelemetryPanel.compact > * {
+    padding-right: 1;
 }
 
 /* Theme: Optigravity Daylight (Light) */
