@@ -486,13 +486,18 @@ MetricRow.val-warn .metric-val {
     text-style: bold;
 }
 
+MetricRow.val-ok .metric-val {
+    color: #3fb950;
+    text-style: bold;
+}
+
 MetricRow.val-danger .metric-val {
     color: #f85149;
     text-style: bold;
 }
 
 /* Modals */
-PermissionModal, ElicitationModal, HandoffReviewModal, SessionPickerModal, HelpGlossaryModal, DiffPreviewModal {
+PermissionModal, ElicitationModal, HandoffReviewModal, SessionPickerModal, HelpGlossaryModal, DiffPreviewModal, DelegationModal, QuickSelectModal, ContextInspectorModal {
     align: center middle;
     background: rgba(8, 10, 14, 0.80);
 }
@@ -868,4 +873,213 @@ Screen.theme-high-contrast {
     background: #000000;
     color: #ffff00;
     border: heavy #ffff00;
+}
+
+/* V3.7 PlanCard, ShellCard, AssistantMessage meta, QuickSelect & ContextInspector */
+AssistantMessage .msg-meta {
+    width: auto;
+    color: #6e7681;
+    padding: 0 2 0 0;
+}
+
+PlanCard {
+    border: none;
+    border-left: thick #58a6ff;
+    background: #111824;
+    padding: 0;
+    margin: 0 0 1 0;
+}
+
+PlanCard CollapsibleTitle {
+    color: #79c0ff;
+    text-style: bold;
+    padding: 0 1;
+}
+
+PlanCard .plan-body {
+    padding: 0 2 1 2;
+    color: #c9d1d9;
+}
+
+ShellCard {
+    border: none;
+    border-left: outer #303a4b;
+    background: #10141c;
+    padding: 0;
+    margin: 0 0 1 0;
+}
+
+ShellCard.tool-running {
+    border-left: outer #6ea8fe;
+}
+
+ShellCard.tool-ok {
+    border-left: outer #3fb950;
+}
+
+ShellCard.tool-err {
+    border-left: outer #f85149;
+    background: #1d1215;
+}
+
+ShellCard CollapsibleTitle {
+    color: #d0d7de;
+    padding: 0 1;
+}
+
+ShellCard .tool-detail {
+    padding: 0 2 1 2;
+    color: #9aa4b2;
+}
+
+ShellCard .shell-attach-btn {
+    height: 1;
+    min-width: 14;
+    border: none;
+    background: #1a2433;
+    color: #6ea8fe;
+    padding: 0 1;
+}
+
+ShellCard .shell-attach-btn:hover {
+    background: #26354d;
+    color: #e6edf3;
+}
+
+#quick-select-list {
+    height: 12;
+    border: solid #2a3344;
+    background: #0e1116;
+    margin: 1 0;
+}
+
+#context-inspector-dialog {
+    width: 88;
+    max-width: 94%;
+    height: 82%;
+}
+
+#context-inspector-scroll {
+    height: 1fr;
+    padding-right: 1;
+}
+
+/* Complete Light Theme coverage for Modals, Bars, PlanCard, ShellCard & Buttons */
+.theme-light .modal-dialog,
+.theme-light #glossary-dialog,
+.theme-light #diff-fullscreen-dialog {
+    background: #ffffff;
+    color: #1f2328;
+    border: solid #afb8c1;
+}
+
+.theme-light .modal-title {
+    color: #1f2328;
+}
+
+.theme-light #session-picker-list,
+.theme-light #quick-select-list,
+.theme-light #handoff-editor,
+.theme-light #delegate-question {
+    background: #f6f8fa;
+    color: #1f2328;
+    border: solid #afb8c1;
+}
+
+.theme-light #proposal-bar {
+    background: #fff8c5;
+    border-bottom: solid #d4a72c;
+}
+
+.theme-light #proposal-text {
+    color: #4d2d00;
+}
+
+.theme-light #proposal-apply-btn {
+    background: #d4a72c;
+    color: #1f2328;
+}
+
+.theme-light #activity-bar,
+.theme-light #attachment-bar,
+.theme-light #transcript-search-bar {
+    background: #eaeef2;
+    color: #0969da;
+}
+
+.theme-light PlanCard {
+    background: #ddf4ff;
+    border-left: thick #0969da;
+}
+
+.theme-light PlanCard CollapsibleTitle {
+    color: #0550ae;
+}
+
+.theme-light PlanCard .plan-body {
+    color: #1f2328;
+}
+
+.theme-light ShellCard {
+    background: #ffffff;
+    border-left: outer #afb8c1;
+}
+
+.theme-light ShellCard CollapsibleTitle {
+    color: #1f2328;
+}
+
+.theme-light ShellCard .tool-detail,
+.theme-light ToolCard .tool-detail {
+    color: #57606a;
+}
+
+.theme-light AssistantMessage .copy-md-btn,
+.theme-light AssistantMessage .copy-code-btn,
+.theme-light ShellCard .shell-attach-btn {
+    background: #eaeef2;
+    color: #0969da;
+}
+
+.theme-light AssistantMessage .msg-meta {
+    color: #57606a;
+}
+
+.theme-light ThoughtBlock CollapsibleTitle,
+.theme-light ThoughtBlock .thought-body,
+.theme-light ActivityGroup CollapsibleTitle {
+    color: #57606a;
+}
+
+/* Complete High-Contrast Theme coverage for Modals, PlanCard & ShellCard */
+.theme-high-contrast .modal-dialog,
+.theme-high-contrast #glossary-dialog,
+.theme-high-contrast #diff-fullscreen-dialog {
+    background: #000000;
+    color: #ffffff;
+    border: heavy #00ffff;
+}
+
+.theme-high-contrast #session-picker-list,
+.theme-high-contrast #quick-select-list,
+.theme-high-contrast #handoff-editor,
+.theme-high-contrast #delegate-question {
+    background: #000000;
+    color: #ffffff;
+    border: solid #ffffff;
+}
+
+.theme-high-contrast PlanCard,
+.theme-high-contrast ShellCard {
+    background: #000000;
+    border-left: heavy #00ffff;
+}
+
+.theme-high-contrast #proposal-bar {
+    background: #221a00;
+    border-bottom: heavy #ffff00;
+}
+
+.theme-high-contrast #proposal-text {
+    color: #ffff00;
 }

@@ -79,6 +79,18 @@ class FakeAgentConn:
         self.calls.append(("close_session", kwargs))
         return SimpleNamespace()
 
+    async def fork_session(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls.append(("fork_session", kwargs))
+        self.session_counter += 1
+        return SimpleNamespace(
+            session_id=f"acp-sess-{self.session_counter}",
+            config_options=[
+                SimpleNamespace(id="model", current_value="gemini-4-hydrogen"),
+                SimpleNamespace(id="mode", current_value="auto"),
+                SimpleNamespace(id="thinking_level", current_value="medium"),
+            ],
+        )
+
     async def set_config_option(self, **kwargs: Any) -> SimpleNamespace:
         self.calls.append(("set_config_option", kwargs))
         return SimpleNamespace(

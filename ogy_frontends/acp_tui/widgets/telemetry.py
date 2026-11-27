@@ -8,8 +8,18 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Label, ProgressBar, Static
 
+from ogy_core.pricing import get_model_pricing
 from ogy_frontends.acp_tui.i18n import ZONE_LABELS, human_quota_label, t
 from ogy_frontends.acp_tui.orchestrator import SessionTelemetryState
+
+
+def estimate_cache_savings_usd(state: SessionTelemetryState, *, enterprise: bool = False) -> float:
+    """Estimate USD saved in this session from prompt cache hits."""
+    if state.cached_read_tokens <= 0:
+        return 0.0
+    pricing = get_model_pricing(state.model_id, enterprise=enterprise)
+    saved_mult = max(0.0, 1.0 - pricing.cache_read_mult)
+    return (state.cached_read_tokens / 1_000_000.0) * pricing.input_per_m * saved_mult
 
 
 def _format_tokens(count: int) -> str:
@@ -141,6 +151,7 @@ class TelemetryPanel(VerticalScroll):
         yield MetricRow(t(self.lang, "metric_thought"), "0 tok", val_id="tel-thought", row_id="row-thought")
         yield MetricRow(t(self.lang, "metric_io"), "0 / 0", val_id="tel-io", row_id="row-io")
         yield MetricRow(t(self.lang, "metric_cost"), "$0.0000", val_id="tel-cost", row_id="row-cost")
+        yield MetricRow(t(self.lang, "metric_cache_saved"), "$0.0000", val_id="tel-cache-saved", row_id="row-cache-saved")
         yield MetricRow(t(self.lang, "metric_idle"), "0s", val_id="tel-idle", row_id="row-idle")
         yield MetricRow(t(self.lang, "metric_fail"), "0", val_id="tel-fail", row_id="row-fail")
 
@@ -165,6 +176,7 @@ class TelemetryPanel(VerticalScroll):
         self.query_one("#row-thought", MetricRow).set_key(t(lang, "metric_thought"))
         self.query_one("#row-io", MetricRow).set_key(t(lang, "metric_io"))
         self.query_one("#row-cost", MetricRow).set_key(t(lang, "metric_cost"))
+        self.query_one("#row-cache-saved", MetricRow).set_key(t(lang, "metric_cache_saved"))
         self.query_one("#row-idle", MetricRow).set_key(t(lang, "metric_idle"))
         self.query_one("#row-fail", MetricRow).set_key(t(lang, "metric_fail"))
         self.query_one("#row-api-spend", MetricRow).set_key(t(lang, "metric_api_spend"))
@@ -177,6 +189,9 @@ class TelemetryPanel(VerticalScroll):
         quotas: dict[str, dict[str, Any]],
         subagent_runs: list[dict[str, Any]] | None = None,
         subagent_summary: dict[str, Any] | None = None,
+        *,
+        budget_hard_cap_usd: float | None = None,
+        enterprise_cache: bool = False,
     ) -> None:
         health = state.assess_health()
         zone_table = ZONE_LABELS.get(self.lang, ZONE_LABELS["fr"])
@@ -208,7 +223,19 @@ class TelemetryPanel(VerticalScroll):
         self.query_one("#tel-io", Label).update(
             f"{_format_tokens(state.input_tokens)} / {_format_tokens(state.output_tokens)}"
         )
-        self.query_one("#tel-cost", Label).update(f"${state.total_cost_usd:.4f}")
+
+        cost_row = self.query_one("#row-cost", MetricRow)
+        cost_status = ""
+        if budget_hard_cap_usd is not None and budget_hard_cap_usd > 0:
+            if state.total_cost_usd >= budget_hard_cap_usd:
+                cost_status = "danger"
+            elif state.total_cost_usd >= budget_hard_cap_usd * 0.8:
+                cost_status = "warn"
+        cost_row.set_value(f"${state.total_cost_usd:.4f}", status=cost_status)
+
+        saved_usd = estimate_cache_savings_usd(state, enterprise=enterprise_cache)
+        saved_row = self.query_one("#row-cache-saved", MetricRow)
+        saved_row.set_value(f"${saved_usd:.4f}", status="ok" if saved_usd >= 0.0001 else "")
 
         idle_s = int(state.idle_gap_s)
         idle_row = self.query_one("#row-idle", MetricRow)

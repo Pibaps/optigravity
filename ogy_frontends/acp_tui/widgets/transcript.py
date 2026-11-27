@@ -359,21 +359,31 @@ class AssistantMessage(Vertical):
         super().__init__()
         self.lang = lang
         self.raw_markdown: str = ""
+        self._started_at: float = time.time()
         self._md_widget: Markdown | None = None
         self._stream: MarkdownStream | None = None
         self._link_cleaner = _StreamingLinkCleaner()
         self._fallback_static: Static | None = None
         self._truncated: bool = False
         self._copy_code_btn: Button | None = None
+        self._meta_label: Static | None = None
 
     def compose(self) -> ComposeResult:
         self._md_widget = Markdown("", parser_factory=create_safe_markdown_parser)
         yield self._md_widget
         with Horizontal(classes="msg-toolbar"):
+            self._meta_label = Static("", classes="msg-meta", markup=False)
+            self._meta_label.display = False
+            yield self._meta_label
             self._copy_code_btn = Button(t(self.lang, "copy_code_btn"), classes="copy-code-btn")
             self._copy_code_btn.display = False
             yield self._copy_code_btn
             yield Button(t(self.lang, "copy_btn"), classes="copy-md-btn")
+
+    def set_meta(self, text: str) -> None:
+        if self._meta_label is not None:
+            self._meta_label.update(text)
+            self._meta_label.display = bool(text)
 
     def _sync_code_button(self) -> None:
         if self._copy_code_btn is not None:
@@ -433,6 +443,9 @@ class AssistantMessage(Vertical):
                 await stream.stop()
             except Exception:
                 pass
+        elapsed = max(0.0, time.time() - self._started_at)
+        if elapsed >= 0.05 and self._meta_label is not None and not self._meta_label.display:
+            self.set_meta(f"{elapsed:.1f}s")
         self._sync_code_button()
 
     def extract_code_blocks(self) -> list[str]:
@@ -627,6 +640,93 @@ class ToolCard(Collapsible):
             self.post_message(self.FullscreenDiffRequested(self.title, self._full_diff_text))
 
 
+class PlanCard(Collapsible):
+    """Live-updating ACP agent plan / task checklist (`plan` session_update)."""
+
+    def __init__(self, entries: list[dict[str, str]], *, lang: str = "fr") -> None:
+        self.lang = lang
+        self.entries: list[dict[str, str]] = []
+        self._body = Static("", classes="plan-body")
+        super().__init__(self._body, title="Plan", collapsed=False)
+        self.update_entries(entries)
+
+    def update_entries(self, entries: list[dict[str, str]]) -> None:
+        self.entries = list(entries)
+        total = len(self.entries)
+        done = sum(1 for e in self.entries if str(e.get("status", "")).lower() == "completed")
+        pct = int(round((done / total) * 100)) if total else 0
+        self.title = t(self.lang, "plan_title", done=done, total=total, pct=pct)
+        out = Text()
+        for idx, ent in enumerate(self.entries):
+            status = str(ent.get("status") or "pending").lower()
+            prio = str(ent.get("priority") or "medium").lower()
+            content = str(ent.get("content") or "")
+            if status == "completed":
+                icon, style = "✓", "#3fb950"
+            elif status in ("in_progress", "running"):
+                icon, style = "●", "bold #6ea8fe"
+            else:
+                icon, style = "○", "#8b949e"
+            out.append(f"{icon} ", style=style)
+            out.append(content, style=style if status == "in_progress" else "")
+            if prio == "high" and status != "completed":
+                out.append(" [high]", style="bold #d29922")
+            if idx < total - 1:
+                out.append("\n")
+        self._body.update(out)
+
+
+class ShellCard(Collapsible):
+    """Inline local shell execution card (`!cmd` / `!w cmd`) with one-click attach-to-prompt."""
+
+    class AttachRequested(Message):
+        def __init__(self, command: str, output: str, exit_code: int) -> None:
+            super().__init__()
+            self.command = command
+            self.output = output
+            self.exit_code = exit_code
+
+    def __init__(self, command: str, *, wrapped: bool = False, lang: str = "fr") -> None:
+        self.lang = lang
+        self.command = command
+        self.wrapped = wrapped
+        self.output_text: str = ""
+        self.exit_code: int | None = None
+        self._detail = Static("…", classes="tool-detail", markup=False)
+        self._attach_btn = Button(t(lang, "shell_attach_btn"), classes="shell-attach-btn")
+        self._attach_btn.display = False
+        body = Vertical(self._detail, Horizontal(self._attach_btn, classes="diff-summary-row"))
+        prefix = "!w" if wrapped else "$"
+        super().__init__(body, title=f"● {prefix} {command}", collapsed=False)
+        self.add_class("shell-card", "tool-running")
+
+    def set_result(self, *, exit_code: int, output: str, elapsed_s: float) -> None:
+        self.exit_code = exit_code
+        self.output_text = output
+        self.remove_class("tool-running", "tool-ok", "tool-err")
+        prefix = "!w" if self.wrapped else "$"
+        if exit_code == 0:
+            self.add_class("tool-ok")
+            self.title = f"✓ {prefix} {self.command}  ·  {elapsed_s:.2f}s"
+        else:
+            self.add_class("tool-err")
+            self.title = f"✗ {prefix} {self.command}  ·  exit {exit_code} · {elapsed_s:.2f}s"
+        preview = output.strip() or "(no output)"
+        if len(preview) > 12_000:
+            preview = preview[:12_000] + f"\n\n[… truncated from {len(output):,} chars]"
+        self._detail.update(preview)
+        self._attach_btn.display = bool(output.strip())
+
+    def apply_lang(self, lang: str) -> None:
+        self.lang = lang
+        if self.is_mounted:
+            self._attach_btn.label = t(lang, "shell_attach_btn")
+
+    @on(Button.Pressed, ".shell-attach-btn")
+    def _on_attach_pressed(self) -> None:
+        self.post_message(self.AttachRequested(self.command, self.output_text, int(self.exit_code or 0)))
+
+
 class SessionTranscript(VerticalScroll):
     """Isolated per-session transcript with MarkdownStream, smart scroll anchor(), and tool cards."""
 
@@ -664,6 +764,8 @@ class SessionTranscript(VerticalScroll):
         self._active_user_text: str = ""
         self._active_user_id: str | None = None
         self._active_group: ActivityGroup | None = None
+        self._active_plan: PlanCard | None = None
+        self._thoughts_expanded: bool = False
         self._tool_cards: dict[str, ToolCard] = {}
         self._grouped_tools: dict[str, ActivityGroup] = {}
         self._search_highlighted: Any | None = None
@@ -890,6 +992,41 @@ class SessionTranscript(VerticalScroll):
             card.update_from_event(event)
         self._mark_new_content()
 
+    async def update_plan(self, entries: list[dict[str, str]]) -> None:
+        """Mount or update the live ACP agent plan/checklist card in place."""
+        if not entries:
+            return
+        self._has_conversation_content = True
+        self._hide_welcome()
+        if self._active_plan is None:
+            card = PlanCard(entries, lang=self.lang)
+            self._active_plan = card
+            await self.mount(card)
+        else:
+            self._active_plan.update_entries(entries)
+        self._mark_new_content()
+
+    async def mount_shell_card(self, command: str, *, wrapped: bool = False) -> ShellCard:
+        """Mount an inline local shell execution card (`!cmd` / `!w cmd`)."""
+        await self.close_active_message()
+        self.close_active_thought()
+        self.close_active_user_message()
+        self._close_activity_group()
+        self._has_conversation_content = True
+        self._hide_welcome()
+        card = ShellCard(command, wrapped=wrapped, lang=self.lang)
+        await self.mount(card)
+        self._mark_new_content()
+        return card
+
+    def toggle_all_thoughts(self) -> bool:
+        """Toggle expanded/collapsed state of all ThoughtBlock drawers in this transcript."""
+        self._thoughts_expanded = not self._thoughts_expanded
+        for child in self.children:
+            if isinstance(child, ThoughtBlock):
+                child.set_verbosity(self._thoughts_expanded)
+        return self._thoughts_expanded
+
     def set_verbosity(self, verbosity: str) -> None:
         self.verbosity = verbosity
         high = verbosity == "high"
@@ -918,6 +1055,10 @@ class SessionTranscript(VerticalScroll):
             return widget.raw_markdown
         if isinstance(widget, ThoughtBlock):
             return widget.raw_text
+        if isinstance(widget, PlanCard):
+            return f"{widget.title}\n" + "\n".join(str(e.get("content") or "") for e in widget.entries)
+        if isinstance(widget, ShellCard):
+            return f"{widget.title}\n{widget.command}\n{widget.output_text}"
         if isinstance(widget, ToolCard):
             return f"{widget.title}\n{widget.event.name}\n{widget.event.raw_input}\n{widget.event.raw_output}"
         if isinstance(widget, ActivityGroup):

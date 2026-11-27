@@ -224,3 +224,82 @@ def test_snapshot_search_and_queue_bar(snap_compare: Any, make_seeded_tui_app: A
     with time_machine.travel(FROZEN_TIME, tick=False):
         app = make_seeded_tui_app(injected_agent_conn=FakeAgentConn(), lang="en")
         assert snap_compare(app, terminal_size=(120, 36), run_before=_run_before)
+
+
+@pytest.mark.snapshot
+def test_snapshot_plan_and_shell_cards(snap_compare: Any, make_seeded_tui_app: Any) -> None:
+    async def _run_before(pilot: Any) -> None:
+        from ogy_frontends.acp_tui.client import PlanUpdateEvent
+
+        app = pilot.app
+        await _settle(pilot)
+        await app._on_acp_event(
+            PlanUpdateEvent(
+                session_id="acp-sess-1",
+                entries=[
+                    {"content": "Inspect ACP protocol handlers", "status": "completed", "priority": "high"},
+                    {"content": "Wire inline shell & PlanCard", "status": "in_progress", "priority": "high"},
+                    {"content": "Run 4-tier pytest suite", "status": "pending", "priority": "medium"},
+                ],
+            )
+        )
+        tr = app.get_active_transcript()
+        assert tr is not None
+        card = await tr.mount_shell_card("git status -s", wrapped=False)
+        card.set_result(exit_code=0, output=" M ogy_frontends/acp_tui/screens/main.py\n", elapsed_s=0.04)
+        await app._on_acp_event(
+            AgentMessageEvent("acp-sess-1", "All V3.7 checks ready.\n```bash\nogy tui --continue\n```\n")
+        )
+        await tr.close_active_message()
+        app._set_working(False)
+        last_msg = tr.get_last_assistant_message()
+        if last_msg is not None:
+            last_msg.set_meta("1.2s")
+        await pilot.pause(0.1)
+        await _settle(pilot)
+
+    with time_machine.travel(FROZEN_TIME, tick=False):
+        app = make_seeded_tui_app(injected_agent_conn=FakeAgentConn(), lang="en")
+        assert snap_compare(app, terminal_size=(120, 36), run_before=_run_before)
+
+
+@pytest.mark.snapshot
+def test_snapshot_context_inspector_modal(snap_compare: Any, make_seeded_tui_app: Any) -> None:
+    async def _run_before(pilot: Any) -> None:
+        from ogy_frontends.acp_tui.screens.modals import ContextInspectorModal
+
+        app = pilot.app
+        await _settle(pilot)
+        if app.current_state is not None:
+            app.current_state.context_tokens = 48_000
+            app.current_state.cached_read_tokens = 180_000
+            app.current_state.input_tokens = 20_000
+            app.current_state.total_cost_usd = 0.0320
+            app.current_state.turn_count = 6
+        await app._handle_slash_command("/context")
+        await pilot.pause(0.1)
+        await _settle(pilot)
+        assert isinstance(app.screen, ContextInspectorModal)
+
+    with time_machine.travel(FROZEN_TIME, tick=False):
+        app = make_seeded_tui_app(injected_agent_conn=FakeAgentConn(), lang="en")
+        assert snap_compare(app, terminal_size=(120, 36), run_before=_run_before)
+
+
+@pytest.mark.snapshot
+def test_snapshot_light_theme_quick_select_modal(snap_compare: Any, make_seeded_tui_app: Any) -> None:
+    async def _run_before(pilot: Any) -> None:
+        from ogy_frontends.acp_tui.screens.modals import QuickSelectModal
+
+        app = pilot.app
+        await _settle(pilot)
+        if app.current_state is not None:
+            app.current_state.context_tokens = 64_000
+        app.action_open_quick_select("model")
+        await pilot.pause(0.1)
+        await _settle(pilot)
+        assert isinstance(app.screen, QuickSelectModal)
+
+    with time_machine.travel(FROZEN_TIME, tick=False):
+        app = make_seeded_tui_app(injected_agent_conn=FakeAgentConn(), lang="en", tui_theme="light")
+        assert snap_compare(app, terminal_size=(120, 36), run_before=_run_before)

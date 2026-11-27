@@ -150,6 +150,24 @@ class SessionNoticeEvent:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class PlanUpdateEvent:
+    session_id: str
+    entries: list[dict[str, str]]  # [{"content": ..., "status": ..., "priority": ...}]
+
+
+@dataclass(frozen=True, slots=True)
+class AvailableCommandsEvent:
+    session_id: str
+    commands: list[dict[str, str]]  # [{"name": ..., "description": ..., "input_hint": ...}]
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentModeUpdateEvent:
+    session_id: str
+    mode_id: str
+
+
 AcpEvent = (
     UserMessageEvent
     | AgentMessageEvent
@@ -161,6 +179,9 @@ AcpEvent = (
     | ElicitationRequestEvent
     | ElicitationCompleteEvent
     | SessionNoticeEvent
+    | PlanUpdateEvent
+    | AvailableCommandsEvent
+    | CurrentModeUpdateEvent
 )
 
 
@@ -346,10 +367,18 @@ class AcpClient:
         self.active_session_id: str | None = None
         self.session_configs: dict[str, dict[str, str]] = {}
         self.session_config_choices: dict[str, dict[str, list[str]]] = {}
+        self.session_commands: dict[str, list[dict[str, str]]] = {}
         self.session_steps: dict[str, int] = {}
         self._last_turn_ts: dict[str, float] = {}
         self._tool_call_names: dict[str, str] = {}
         self._replaying_sessions: set[str] = set()
+
+    def get_available_commands(self, session_id: str | None = None) -> list[dict[str, str]]:
+        """Return ACP server-advertised slash commands for `session_id`."""
+        sid = session_id or self.active_session_id
+        if not sid:
+            return []
+        return list(self.session_commands.get(sid, []))
 
     def get_config_choices(self, config_id: str, session_id: str | None = None) -> list[str]:
         """Return advertised selectable values for a config option (if known)."""
@@ -705,6 +734,49 @@ class AcpClient:
                 self.session_config_choices[session_id] = parsed_choices
             self.session_configs[session_id] = cfg
             await self._emit(ConfigUpdateEvent(session_id, dict(cfg)))
+        elif kind == "plan":
+            raw_entries = getattr(update, "entries", None) or []
+            entries: list[dict[str, str]] = []
+            for ent in raw_entries:
+                if isinstance(ent, dict):
+                    content = str(ent.get("content") or "")
+                    status = str(ent.get("status") or "pending")
+                    priority = str(ent.get("priority") or "medium")
+                else:
+                    content = str(getattr(ent, "content", "") or "")
+                    status = str(getattr(ent, "status", "pending") or "pending")
+                    priority = str(getattr(ent, "priority", "medium") or "medium")
+                if content:
+                    entries.append({"content": content, "status": status, "priority": priority})
+            await self._emit(PlanUpdateEvent(session_id=session_id, entries=entries))
+        elif kind == "available_commands_update":
+            raw_cmds = getattr(update, "available_commands", None) or getattr(update, "availableCommands", None) or []
+            commands: list[dict[str, str]] = []
+            for item in raw_cmds:
+                if isinstance(item, dict):
+                    cname = str(item.get("name") or "").strip().lstrip("/")
+                    desc = str(item.get("description") or "").strip()
+                    inp = item.get("input")
+                    hint = str(inp.get("hint") or "") if isinstance(inp, dict) else ""
+                else:
+                    cname = str(getattr(item, "name", "") or "").strip().lstrip("/")
+                    desc = str(getattr(item, "description", "") or "").strip()
+                    inp = getattr(item, "input", None)
+                    hint = str(getattr(inp, "hint", "") or "") if inp is not None else ""
+                if cname:
+                    commands.append({"name": cname, "description": desc, "input_hint": hint})
+            self.session_commands[session_id] = commands
+            await self._emit(AvailableCommandsEvent(session_id=session_id, commands=commands))
+        elif kind == "current_mode_update":
+            mode_id = str(
+                getattr(update, "current_mode_id", None)
+                or getattr(update, "currentModeId", None)
+                or getattr(update, "mode_id", None)
+                or ""
+            ).strip()
+            if mode_id and mode_id.lower() not in BANNED_ACP_MODES:
+                self.session_configs.setdefault(session_id, {})["mode"] = mode_id
+                await self._emit(CurrentModeUpdateEvent(session_id=session_id, mode_id=mode_id))
 
     async def _handle_request_permission(
         self,

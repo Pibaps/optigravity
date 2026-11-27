@@ -582,7 +582,9 @@ def build_parser() -> argparse.ArgumentParser:
         p_tui.add_argument("--auth-mode", default="oauth-personal", help="Auth mode (oauth-personal or api-key)")
         p_tui.add_argument("--model", default=None, help="Pin initial model (disables 1st-prompt auto-routing)")
         p_tui.add_argument("--effort", default=None, help="Pin initial effort (disables 1st-prompt auto-routing)")
-        p_tui.add_argument("--lang", default="fr", choices=["fr", "en"], help="TUI language (fr or en)")
+        p_tui.add_argument("-r", "--resume", nargs="?", const="__LATEST__", default=None, help="Resume session by ID (or latest if omitted)")
+        p_tui.add_argument("-c", "--continue", dest="continue_last", action="store_true", help="Continue the most recent session")
+        p_tui.add_argument("--lang", default=None, choices=["fr", "en"], help="TUI language (defaults to config.toml)")
         p_tui.add_argument(
             "--theme",
             default=None,
@@ -726,6 +728,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
 
+        resume_sid = None if args.resume in (None, "__LATEST__") else args.resume
+        continue_last = bool(args.continue_last or args.resume == "__LATEST__")
         return run_tui(
             cwd=args.cwd,
             sandbox=args.sandbox,
@@ -738,6 +742,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             effort=args.effort,
             lang=args.lang,
             theme=args.theme,
+            resume_session_id=resume_sid,
+            continue_last=continue_last,
         )
     if args.command == "router-eval":
         from ogy_core.router import evaluate_bandit_offline

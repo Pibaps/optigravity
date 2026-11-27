@@ -27,10 +27,13 @@ from ogy_frontends.acp_tui.client import (
     AcpEvent,
     AgentMessageEvent,
     AgentThoughtEvent,
+    AvailableCommandsEvent,
     ConfigUpdateEvent,
+    CurrentModeUpdateEvent,
     ElicitationCompleteEvent,
     ElicitationRequestEvent,
     PermissionRequestEvent,
+    PlanUpdateEvent,
     SessionNoticeEvent,
     ToolCallEvent,
     UsageEvent,
@@ -39,12 +42,14 @@ from ogy_frontends.acp_tui.client import (
 from ogy_frontends.acp_tui.i18n import SUPPORTED_LANGS, t
 from ogy_frontends.acp_tui.orchestrator import ActionProposal, SessionTelemetryState
 from ogy_frontends.acp_tui.screens.modals import (
+    ContextInspectorModal,
     DelegationModal,
     DiffPreviewModal,
     ElicitationModal,
     HandoffReviewModal,
     HelpGlossaryModal,
     PermissionModal,
+    QuickSelectModal,
     SessionPickerModal,
 )
 from ogy_frontends.acp_tui.state.sessions import (
@@ -54,9 +59,19 @@ from ogy_frontends.acp_tui.state.sessions import (
     load_local_transcript_entries,
     load_sessions_meta_readonly,
 )
-from ogy_frontends.acp_tui.widgets.composer import PromptComposer, PromptTextArea
-from ogy_frontends.acp_tui.widgets.telemetry import TelemetryPanel, _format_tokens, _safe_widget_id
-from ogy_frontends.acp_tui.widgets.transcript import AssistantMessage, SessionTranscript, ToolCard
+from ogy_frontends.acp_tui.widgets.composer import PromptComposer, PromptTextArea, _format_size
+from ogy_frontends.acp_tui.widgets.telemetry import (
+    TelemetryPanel,
+    _format_tokens,
+    _safe_widget_id,
+    estimate_cache_savings_usd,
+)
+from ogy_frontends.acp_tui.widgets.transcript import (
+    AssistantMessage,
+    SessionTranscript,
+    ShellCard,
+    ToolCard,
+)
 
 DEFAULT_MODELS = ["gemini-4-hydrogen", "gemini-4-neon", "gemini-4-carbon"]
 DEFAULT_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
@@ -65,6 +80,14 @@ DEFAULT_FRUGAL_MODEL = "gemini-4-hydrogen"
 DEFAULT_FRUGAL_EFFORT = "medium"
 SUPPORTED_THEMES = ("dark", "light", "high-contrast")
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +102,14 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/model", "/model <slug>", "cmd_model", True),
     SlashCommandSpec("/effort", "/effort <level>", "cmd_effort", True),
     SlashCommandSpec("/mode", "/mode <mode>", "cmd_mode", True),
+    SlashCommandSpec("/select", "/select [kind]", "cmd_select", True),
     SlashCommandSpec("/btw", "/btw <question>", "cmd_btw", True),
     SlashCommandSpec("/delegate", "/delegate [question]", "cmd_delegate", True),
+    SlashCommandSpec("/diff", "/diff", "cmd_diff"),
+    SlashCommandSpec("/attach", "/attach <path>", "cmd_attach", True),
+    SlashCommandSpec("/context", "/context", "cmd_context"),
+    SlashCommandSpec("/mcp", "/mcp", "cmd_mcp"),
+    SlashCommandSpec("/config", "/config [key val]", "cmd_config", True),
     SlashCommandSpec("/theme", "/theme <name>", "cmd_theme", True),
     SlashCommandSpec("/lang", "/lang <fr|en>", "cmd_lang", True),
     SlashCommandSpec("/copy", "/copy [code]", "cmd_copy", True),
@@ -88,6 +117,8 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/status", "/status", "cmd_status"),
     SlashCommandSpec("/find", "/find", "cmd_find"),
     SlashCommandSpec("/clear-queue", "/clear-queue", "cmd_clear_queue"),
+    SlashCommandSpec("/fork", "/fork", "cmd_fork"),
+    SlashCommandSpec("/compact", "/compact", "cmd_compact"),
     SlashCommandSpec("/rotate", "/rotate", "cmd_rotate"),
     SlashCommandSpec("/handoff", "/handoff", "cmd_handoff"),
     SlashCommandSpec("/new", "/new", "cmd_new"),
@@ -136,6 +167,121 @@ def _detect_git_branch(cwd: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def _collect_git_diff(cwd: str) -> tuple[str, Text]:
+    """Collect `git status --short` + unified `git diff` (+ staged) in a worker thread.
+
+    Returns `(status, rich_text)` where `status` is `'ok' | 'clean' | 'not_git'`.
+    """
+    try:
+        st = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=4.0,
+            check=False,
+        )
+        if st.returncode != 0:
+            return "not_git", Text("")
+        d_unstaged = subprocess.run(
+            ["git", "diff", "--no-color"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        d_staged = subprocess.run(
+            ["git", "diff", "--cached", "--no-color"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except Exception:
+        return "not_git", Text("")
+
+    status_out = st.stdout.strip()
+    diff_parts = [p for p in (d_staged.stdout.strip(), d_unstaged.stdout.strip()) if p]
+    if not status_out and not diff_parts:
+        return "clean", Text("")
+
+    rich_out = Text()
+    if status_out:
+        rich_out.append("=== git status --short ===\n", style="bold #6ea8fe")
+        rich_out.append(status_out + "\n\n", style="#c9d1d9")
+    for raw_diff in diff_parts:
+        for line in raw_diff.splitlines():
+            if line.startswith("+++") or line.startswith("---") or line.startswith("diff --git"):
+                rich_out.append(line + "\n", style="bold #8b949e")
+            elif line.startswith("@@"):
+                rich_out.append(line + "\n", style="bold #6ea8fe")
+            elif line.startswith("+"):
+                rich_out.append(line + "\n", style="#3fb950 on #12261e")
+            elif line.startswith("-"):
+                rich_out.append(line + "\n", style="#f85149 on #2b1417")
+            else:
+                rich_out.append(line + "\n", style="#c9d1d9")
+    return "ok", rich_out
+
+
+def _collect_mcp_servers(agy_config_dir: Path, cwd: str) -> list[dict[str, Any]]:
+    """Read configured MCP servers from profile & workspace `mcp_config.json` (read-only)."""
+    candidates = [
+        ("profile", agy_config_dir / "mcp_config.json"),
+        ("workspace", Path(cwd) / ".agents" / "mcp_config.json"),
+    ]
+    servers: list[dict[str, Any]] = []
+    for scope, path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        raw_map = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(raw_map, dict):
+            continue
+        for name, spec in sorted(raw_map.items()):
+            if not isinstance(spec, dict):
+                continue
+            cmd = str(spec.get("command") or spec.get("url") or "?")
+            eager = bool(spec.get("eager", False))
+            servers.append({"name": name, "scope": scope, "command": cmd, "eager": eager, "path": str(path)})
+    return servers
+
+
+def _collect_context_artifacts(cwd: str) -> dict[str, list[tuple[str, int]]]:
+    """Scan workspace for agy/Claude rules, memory files, and skills (run in worker thread)."""
+    root = Path(cwd).resolve()
+    memory_files: list[tuple[str, int]] = []
+    for name in ("GEMINI.md", "AGENTS.md", "CLAUDE.md", ".ogy/handoff.md"):
+        p = root / name
+        if p.is_file():
+            try:
+                memory_files.append((name, p.stat().st_size))
+            except OSError:
+                pass
+    rules: list[tuple[str, int]] = []
+    rules_dir = root / ".agents" / "rules"
+    if rules_dir.is_dir():
+        for p in sorted(rules_dir.glob("*.md"))[:20]:
+            try:
+                rules.append((p.relative_to(root).as_posix(), p.stat().st_size))
+            except OSError:
+                pass
+    skills: list[tuple[str, int]] = []
+    skills_dir = root / ".agents" / "skills"
+    if skills_dir.is_dir():
+        for p in sorted(skills_dir.glob("*/SKILL.md"))[:20]:
+            try:
+                skills.append((p.parent.name, p.stat().st_size))
+            except OSError:
+                pass
+    return {"memory": memory_files, "rules": rules, "skills": skills}
 
 
 def _build_handoff_draft(state: SessionTelemetryState, cwd: str) -> str:
@@ -441,6 +587,16 @@ class MainWorkspaceControllerMixin:
     def on_tool_card_fullscreen_diff_requested(self, event: ToolCard.FullscreenDiffRequested) -> None:
         self.push_screen(DiffPreviewModal(event.title, event.diff_text, lang=self.lang))
 
+    def on_shell_card_attach_requested(self, event: ShellCard.AttachRequested) -> None:
+        bounded = event.output.strip()
+        if len(bounded) > 6000:
+            bounded = bounded[:6000] + "\n[… truncated]"
+        block = f"[Shell output: `$ {event.command}` (exit {event.exit_code})]\n```\n{bounded}\n```"
+        ta = self.query_one("#prompt-input", PromptTextArea)
+        ta.value = (ta.text.rstrip() + "\n\n" + block).strip() if ta.text.strip() else block
+        ta.focus()
+        self._toast(t(self.lang, "shell_attached", chars=len(bounded)))
+
     # ------------------------------------------------------------------
     # Working spinner & language
     # ------------------------------------------------------------------
@@ -494,13 +650,31 @@ class MainWorkspaceControllerMixin:
     async def _boot_acp(self) -> None:
         try:
             await self.client.connect(agent_conn=self._injected_agent_conn)
-            sid = await self.client.new_session(self.client_config.cwd)
-            self._ensure_state(sid, activate=True)
-            await self._ensure_transcript(sid, activate=True)
-            await self._apply_initial_profile(sid)
-            self._refresh_ui()
+            target_resume: str | None = getattr(self, "resume_session_id", None)
+            if not target_resume and getattr(self, "continue_last", False):
+                try:
+                    sessions = await self.client.list_sessions()
+                except Exception:
+                    sessions = []
+                if sessions:
+                    target_resume = str(sessions[-1].get("session_id") or sessions[-1].get("sessionId") or "") or None
+                if not target_resume:
+                    db_meta = await asyncio.to_thread(load_sessions_meta_readonly, self.ogy_config.db_path, 1)
+                    if db_meta:
+                        target_resume = next(iter(db_meta.keys()))
+
+            if target_resume:
+                await self._resume_session_by_id(target_resume)
+                sid = target_resume
+            else:
+                sid = await self.client.new_session(self.client_config.cwd)
+                self._ensure_state(sid, activate=True)
+                await self._ensure_transcript(sid, activate=True)
+                await self._apply_initial_profile(sid)
+                self._refresh_ui()
+
             if self.initial_prompt:
-                await self._dispatch_prompt(self.initial_prompt)
+                await self._dispatch_prompt(self.initial_prompt, session_id=sid)
         except AcpAuthError as exc:
             await self._append_notice(t(self.lang, "auth_required", err=exc), level="err")
         except Exception as exc:
@@ -615,11 +789,21 @@ class MainWorkspaceControllerMixin:
             return []
         if " " not in raw_value:
             prefix = raw_value.lower()
-            return [
+            items: list[tuple[str, str]] = [
                 (f"{s.name} " if s.takes_arg else s.name, f"{s.usage:<20}  {t(self.lang, s.desc_key)}")
                 for s in SLASH_COMMANDS
                 if s.name.startswith(prefix)
             ]
+            local_names = {s.name for s in SLASH_COMMANDS}
+            for acmd in self.client.get_available_commands():
+                cname = f"/{acmd['name']}"
+                if cname in local_names or not cname.lower().startswith(prefix):
+                    continue
+                takes_arg = bool(acmd.get("input_hint"))
+                usage = f"{cname} <{acmd['input_hint']}>" if takes_arg else cname
+                desc = acmd.get("description") or "ACP agent command"
+                items.append((f"{cname} " if takes_arg else cname, f"{usage:<20}  [agy] {desc}"))
+            return items
         cmd_part, arg_part = raw_value.split(" ", 1)
         cmd = cmd_part.lower()
         arg_prefix = arg_part.strip().lower()
@@ -629,6 +813,12 @@ class MainWorkspaceControllerMixin:
             return [(f"/effort {e}", f"/effort {e}") for e in self.get_available_efforts() if e.lower().startswith(arg_prefix)]
         if cmd == "/mode":
             return [(f"/mode {md}", f"/mode {md}") for md in self.get_available_modes() if md.lower().startswith(arg_prefix)]
+        if cmd == "/select":
+            return [
+                (f"/select {k}", f"/select {k}")
+                for k in ("model", "effort", "mode", "theme")
+                if k.startswith(arg_prefix)
+            ]
         if cmd == "/theme":
             return [
                 (f"/theme {th}", f"/theme {th}")
@@ -647,6 +837,28 @@ class MainWorkspaceControllerMixin:
                 for code, lbl in (("fr", "Français"), ("en", "English"))
                 if code.startswith(arg_prefix)
             ]
+        if cmd == "/attach":
+            try:
+                entries = self.query_one("#prompt-composer", PromptComposer)._file_index
+            except Exception:
+                entries = []
+            img_entries = [
+                e for e in entries
+                if Path(e.rel_path).suffix.lower() in _IMAGE_MIME_TYPES
+                and (not arg_prefix or arg_prefix in e.rel_path.lower())
+            ][:10]
+            return [
+                (f"/attach {e.rel_path}", f"/attach {e.rel_path}  ({_format_size(e.size_bytes, self.lang)})")
+                for e in img_entries
+            ]
+        if cmd == "/config":
+            from ogy_cli.config_cmd import CONFIG_SCHEMA
+
+            return [
+                (f"/config {k} ", f"/config {k}")
+                for k in sorted(CONFIG_SCHEMA.keys())
+                if k.lower().startswith(arg_prefix)
+            ][:12]
         if cmd == "/resume":
             return [
                 (f"/resume {sid}", f"/resume {sid[:12]} ({st.model_id})")
@@ -676,6 +888,16 @@ class MainWorkspaceControllerMixin:
             await tr.append_thought_chunk(event.text)
         elif isinstance(event, ToolCallEvent):
             await self._handle_tool_call(event, replaying=replaying)
+        elif isinstance(event, PlanUpdateEvent):
+            tr = await self._ensure_transcript(event.session_id)
+            await tr.update_plan(event.entries)
+        elif isinstance(event, AvailableCommandsEvent):
+            # Commands are already cached in self.client.session_commands; nothing blocking needed.
+            pass
+        elif isinstance(event, CurrentModeUpdateEvent):
+            state = self._ensure_state(event.session_id)
+            state.mode = event.mode_id
+            self._refresh_ui()
         elif isinstance(event, UsageEvent):
             await self._handle_usage(event)
         elif isinstance(event, ConfigUpdateEvent):
@@ -800,6 +1022,12 @@ class MainWorkspaceControllerMixin:
             "red": ("■", "bold #f85149"),
         }.get(health.zone, ("●", "bold #3fb950"))
 
+        mode_style = {
+            "plan": "bold #58a6ff",
+            "accept-edits": "bold #d29922",
+            "auto": "bold #3fb950",
+        }.get(state.mode.lower(), "bold #c9d1d9")
+
         out = Text()
         out.append(f"{zone_dot} ", style=zone_style)
         base_str = t(
@@ -811,7 +1039,17 @@ class MainWorkspaceControllerMixin:
             effort=state.effort,
             mode=state.mode,
         )
-        out.append(base_str)
+        # Highlight the mode value with semantic color while preserving exact text
+        mode_marker = f"Mode : {state.mode}" if self.lang == "fr" else f"Mode: {state.mode}"
+        if mode_marker in base_str:
+            before, after = base_str.split(mode_marker, 1)
+            prefix_label = "Mode : " if self.lang == "fr" else "Mode: "
+            out.append(before)
+            out.append(prefix_label)
+            out.append(state.mode, style=mode_style)
+            out.append(after)
+        else:
+            out.append(base_str)
 
         if self._git_branch:
             out.append(f"  ·  ⎇ {self._git_branch}", style="#6ea8fe")
@@ -842,7 +1080,25 @@ class MainWorkspaceControllerMixin:
         bar.update(self._build_session_bar_renderable(state, sidebar_hidden=sidebar_hidden))
 
         snap = self.registry.latest_snapshot
-        tel_panel.refresh_state(state, snap.quotas, snap.subagent_runs, snap.subagent_summary)
+        cap = self.ogy_config.budget_hard_cap_usd
+        tel_panel.refresh_state(
+            state,
+            snap.quotas,
+            snap.subagent_runs,
+            snap.subagent_summary,
+            budget_hard_cap_usd=cap,
+            enterprise_cache=self.ogy_config.enterprise_cache_pricing,
+        )
+        if cap is not None and cap > 0 and state.total_cost_usd >= cap:
+            warned: set[str] = getattr(self, "_budget_warned_sessions", set())
+            if state.session_id not in warned:
+                warned.add(state.session_id)
+                self._budget_warned_sessions = warned
+                self._toast(
+                    t(self.lang, "budget_cap_warning", cost=state.total_cost_usd, cap=cap),
+                    severity="warning",
+                    timeout=5.0,
+                )
         self._refresh_queue_bar()
 
         proposals = self.orchestrator.evaluate_proposals(state)
@@ -863,6 +1119,11 @@ class MainWorkspaceControllerMixin:
     async def on_prompt_composer_prompt_submitted(self, event: PromptComposer.PromptSubmitted) -> None:
         text = event.text.strip()
         if not text:
+            return
+        if text.startswith("!"):
+            task = asyncio.create_task(self._run_inline_shell(text))
+            self._inflight_tasks.add(task)
+            task.add_done_callback(self._inflight_tasks.discard)
             return
         if text.startswith("/"):
             await self._handle_slash_command(text)
@@ -1107,7 +1368,246 @@ class MainWorkspaceControllerMixin:
                 return
             await self._resume_session_by_id(arg)
             return
+        if cmd == "/fork":
+            await self.action_fork_session()
+            return
+        if cmd == "/compact":
+            await self.action_open_rotation_review()
+            return
+        if cmd == "/diff":
+            await self._open_git_diff()
+            return
+        if cmd == "/attach":
+            await self._attach_image_path(arg)
+            return
+        if cmd == "/context":
+            await self._open_context_inspector()
+            return
+        if cmd == "/mcp":
+            await self._show_mcp_servers()
+            return
+        if cmd == "/config":
+            await self._handle_config_command(arg)
+            return
+        if cmd == "/select":
+            kind = arg.lower() if arg.lower() in ("model", "effort", "mode", "theme") else "model"
+            self.action_open_quick_select(kind)
+            return
+
+        # Forward ACP server-advertised slash commands (e.g. /review, /plan, skills) directly to agy
+        agent_cmd_names = {f"/{c['name'].lower()}" for c in self.client.get_available_commands()}
+        if cmd in agent_cmd_names:
+            task = asyncio.create_task(self._dispatch_prompt(cmd_line.strip(), display_text=cmd_line.strip()))
+            self._inflight_tasks.add(task)
+            task.add_done_callback(self._inflight_tasks.discard)
+            return
+
         await self._append_notice(t(self.lang, "cmd_unknown", cmd=rich_escape(cmd_line)), level="warn")
+
+    async def _run_inline_shell(self, raw_text: str) -> None:
+        """Execute `!cmd` or `!w cmd` (ogy wrap) locally without blocking the Textual UI thread."""
+        body = raw_text[1:].strip()
+        if not body:
+            return
+        wrapped = False
+        if body.startswith("w "):
+            wrapped = True
+            body = body[2:].strip()
+        if not body:
+            return
+
+        sid = self.registry.active_session_id or self.client.active_session_id or "default"
+        tr = await self._ensure_transcript(sid, activate=True)
+        card = await tr.mount_shell_card(body, wrapped=wrapped)
+        t0 = time.monotonic()
+
+        try:
+            if wrapped:
+                import shlex
+                import sys
+                from ogy_core.firebreaks import run_wrapped_command
+
+                tokens = shlex.split(body)
+                # Run ogy wrap in a subprocess so stdout/stderr are cleanly captured
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "ogy_cli.main",
+                    "wrap",
+                    "--",
+                    *tokens,
+                    cwd=self.client_config.cwd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    body,
+                    cwd=self.client_config.cwd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            try:
+                out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                rc = int(proc.returncode or 0)
+                output = out_bytes.decode("utf-8", errors="replace")
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                rc = 124
+                output = t(self.lang, "shell_timeout", sec=30)
+        except Exception as exc:
+            rc = 1
+            output = str(exc)
+
+        elapsed = max(0.0, time.monotonic() - t0)
+        card.set_result(exit_code=rc, output=output, elapsed_s=elapsed)
+
+    async def _open_git_diff(self) -> None:
+        status, diff_text = await asyncio.to_thread(_collect_git_diff, self.client_config.cwd)
+        if status == "not_git":
+            self._toast(t(self.lang, "diff_not_git"), severity="warning")
+            return
+        if status == "clean":
+            self._toast(t(self.lang, "diff_clean"))
+            return
+        self.push_screen(DiffPreviewModal(t(self.lang, "diff_title"), diff_text, lang=self.lang))
+
+    async def _attach_image_path(self, raw_path: str) -> None:
+        if not raw_path.strip():
+            await self._append_notice(t(self.lang, "attach_usage"))
+            return
+        p = Path(raw_path.strip()).expanduser()
+        if not p.is_absolute():
+            p = Path(self.client_config.cwd) / p
+        if not p.is_file():
+            self._toast(t(self.lang, "attach_not_found", path=raw_path), severity="warning")
+            return
+        ext = p.suffix.lower()
+        mime = _IMAGE_MIME_TYPES.get(ext)
+        if not mime:
+            self._toast(t(self.lang, "attach_unsupported", ext=ext or "(none)"), severity="warning")
+            return
+        try:
+            size = p.stat().st_size
+        except OSError as exc:
+            self._toast(str(exc), severity="error")
+            return
+        if size > _MAX_IMAGE_BYTES:
+            self._toast(t(self.lang, "attach_too_large", size=_format_size(size, self.lang)), severity="warning")
+            return
+        data = await asyncio.to_thread(p.read_bytes)
+        ta = self.query_one("#prompt-input", PromptTextArea)
+        chip = ta.attach_image(data, mime_type=mime)
+        ta.focus()
+        self._toast(t(self.lang, "attach_done", chip=chip, size=_format_size(size, self.lang)))
+
+    async def _open_context_inspector(self) -> None:
+        state = self.current_state
+        artifacts, mcp_servers = await asyncio.gather(
+            asyncio.to_thread(_collect_context_artifacts, self.client_config.cwd),
+            asyncio.to_thread(_collect_mcp_servers, self.ogy_config.agy_config_dir, self.client_config.cwd),
+        )
+        lines: list[str] = []
+        if state is not None:
+            health = state.assess_health()
+            ctx_pct = min(100.0, (state.context_tokens / max(1, state.context_max)) * 100.0)
+            cache_str = f"{health.cache_hit_pct:.1f}%" if health.cache_hit_pct is not None else "--"
+            saved_usd = estimate_cache_savings_usd(state, enterprise=self.ogy_config.enterprise_cache_pricing)
+            lines.extend(
+                [
+                    "## Session & Context Health",
+                    f"- **Session**: `{state.session_id}` · **Profile**: `{self.ogy_config.profile_mode}`",
+                    f"- **Model / Effort / Mode**: `{state.model_id}` / `{state.effort}` / `{state.mode}`",
+                    f"- **Context Window**: `{_format_tokens(state.context_tokens)} / {_format_tokens(state.context_max)}` (`{ctx_pct:.1f}%` · zone `{health.zone}`)",
+                    f"- **Prompt Cache Hit**: `{cache_str}` · **Est. Cache Saved**: `${saved_usd:.4f}`",
+                    f"- **Est. Session Cost**: `${state.total_cost_usd:.4f}` · **Turns**: `{state.turn_count}`",
+                    "",
+                ]
+            )
+            if state.context_tokens > 0:
+                lines.append("## Switch Tax Preview (if changing model now)")
+                for m in self.get_available_models():
+                    tax = self.orchestrator.compute_switch_tax(state, m)
+                    cur_tag = " *(current)*" if m == state.model_id else ""
+                    lines.append(f"- `{m}`{cur_tag}: `~${tax:.4f}`")
+                lines.append("")
+
+        lines.append("## Workspace Rules, Memory & Skills")
+        mem = artifacts.get("memory") or []
+        rules = artifacts.get("rules") or []
+        skills = artifacts.get("skills") or []
+        if mem:
+            lines.append("- **Memory files**: " + ", ".join(f"`{n}` ({_format_size(sz, self.lang)})" for n, sz in mem))
+        else:
+            lines.append("- **Memory files**: *(none detected)*")
+        if rules:
+            lines.append("- **Rules (`.agents/rules`)**: " + ", ".join(f"`{n}` ({_format_size(sz, self.lang)})" for n, sz in rules))
+        if skills:
+            lines.append("- **Skills (`.agents/skills`)**: " + ", ".join(f"`{n}`" for n, _ in skills))
+        lines.append("")
+
+        lines.extend(
+            [
+                "## Optigravity Firebreaks & MCP",
+                f"- **File / Doc / Data limits**: `{_format_size(self.ogy_config.firebreak_file_max_bytes, self.lang)}` / `{_format_size(self.ogy_config.firebreak_doc_max_bytes, self.lang)}` / `{_format_size(self.ogy_config.firebreak_data_max_bytes, self.lang)}`",
+                f"- **Loop threshold**: `{self.ogy_config.firebreak_loop_threshold}` · **Subagents privacy**: `{self.ogy_config.subagents_privacy_mode}`",
+                f"- **Configured MCP servers**: `{len(mcp_servers)}`",
+            ]
+        )
+        for srv in mcp_servers[:10]:
+            mode_tag = "eager" if srv["eager"] else "lazy"
+            lines.append(f"  - `{srv['name']}` ({srv['scope']}, {mode_tag}) → `{srv['command']}`")
+
+        self.push_screen(ContextInspectorModal("\n".join(lines), lang=self.lang))
+
+    async def _show_mcp_servers(self) -> None:
+        servers = await asyncio.to_thread(_collect_mcp_servers, self.ogy_config.agy_config_dir, self.client_config.cwd)
+        if not servers:
+            await self._append_notice(t(self.lang, "mcp_empty"))
+            return
+        lines = [t(self.lang, "mcp_header")]
+        for srv in servers:
+            tag = "eager" if srv["eager"] else "lazy"
+            lines.append(f"  - {srv['name']} [{srv['scope']} · {tag}] → {srv['command']}")
+        await self._append_notice("\n".join(lines))
+
+    async def _handle_config_command(self, arg: str) -> None:
+        from ogy_cli.config_cmd import set_config_value
+
+        parts = arg.strip().split(maxsplit=1) if arg.strip() else []
+        if not parts:
+            summary = (
+                f"config_path={self.ogy_config.config_path}\n"
+                f"  general.profile_mode = {self.ogy_config.profile_mode}\n"
+                f"  general.language = {self.ogy_config.language}\n"
+                f"  tui.theme = {self.tui_theme}\n"
+                f"  tui.enter_behavior = {self.ogy_config.tui_enter_behavior}\n"
+                f"  budget.hard_cap_usd = {self.ogy_config.budget_hard_cap_usd}\n"
+                f"  subagents.privacy_mode = {self.ogy_config.subagents_privacy_mode}"
+            )
+            await self._append_notice(summary)
+            return
+        if len(parts) < 2:
+            await self._append_notice("Usage: /config <section.key> <value>")
+            return
+        key, val = parts[0], parts[1]
+        try:
+            parsed = await asyncio.to_thread(set_config_value, key, val, config_path=self.ogy_config.config_path)
+            if key == "tui.theme":
+                self._apply_theme(str(parsed), notify=False)
+            elif key == "general.language":
+                self._apply_language(str(parsed))
+            elif key == "budget.hard_cap_usd":
+                self.ogy_config.budget_hard_cap_usd = float(parsed) if parsed else None
+                self._refresh_ui()
+            self._toast(t(self.lang, "config_updated", key=key, val=parsed))
+        except Exception as exc:
+            self._toast(t(self.lang, "config_failed", err=exc), severity="error")
 
     async def _export_active_session(self, custom_path: str = "") -> None:
         tr = self.get_active_transcript()
@@ -1279,6 +1779,78 @@ class MainWorkspaceControllerMixin:
             tr.set_verbosity(self.verbosity)
         self._toast(t(self.lang, "verbosity_notice", mode=self.verbosity))
 
+    def action_toggle_thoughts(self) -> None:
+        tr = self.get_active_transcript()
+        if tr is None:
+            return
+        expanded = tr.toggle_all_thoughts()
+        state_lbl = t(self.lang, "thoughts_expanded" if expanded else "thoughts_collapsed")
+        self._toast(t(self.lang, "thoughts_toggled", state=state_lbl))
+
+    async def action_cycle_mode(self) -> None:
+        """Cycle ACP execution mode (`default -> accept-edits -> auto -> plan`, never `yolo`)."""
+        if isinstance(self.screen, ModalScreen):
+            return
+        state = self.current_state
+        if state is None or not self.client.is_connected:
+            return
+        modes = [m for m in self.get_available_modes() if m.lower() != "yolo"]
+        if not modes:
+            return
+        try:
+            idx = modes.index(state.mode)
+            next_mode = modes[(idx + 1) % len(modes)]
+        except ValueError:
+            next_mode = modes[0]
+        try:
+            await self.client.set_config_option("mode", next_mode)
+            self._refresh_ui()
+            self._toast(t(self.lang, "mode_cycled", val=next_mode))
+        except Exception as exc:
+            self._toast(str(exc), severity="warning")
+
+    def action_open_quick_select(self, kind: str = "model") -> None:
+        """Open keyboard-first QuickSelectModal (`Alt+M` / `/select [model|effort|mode|theme]`)."""
+        if isinstance(self.screen, ModalScreen):
+            return
+        state = self.current_state
+        options: list[tuple[str, str, str]] = []
+        if kind == "model":
+            title = t(self.lang, "quick_select_title", kind=t(self.lang, "quick_select_model"))
+            for m in self.get_available_models():
+                cur = "● " if (state and state.model_id == m) else "  "
+                tax_str = ""
+                if state and state.context_tokens > 0 and state.model_id != m:
+                    tax = self.orchestrator.compute_switch_tax(state, m)
+                    tax_str = f"  (Switch Tax ~${tax:.4f})"
+                options.append(("model", m, f"{cur}{m}{tax_str}"))
+        elif kind == "effort":
+            title = t(self.lang, "quick_select_title", kind=t(self.lang, "quick_select_effort"))
+            for e in self.get_available_efforts():
+                cur = "● " if (state and state.effort == e) else "  "
+                options.append(("effort", e, f"{cur}{e}"))
+        elif kind == "mode":
+            title = t(self.lang, "quick_select_title", kind=t(self.lang, "quick_select_mode"))
+            for md in self.get_available_modes():
+                cur = "● " if (state and state.mode == md) else "  "
+                options.append(("mode", md, f"{cur}{md}"))
+        else:
+            title = t(self.lang, "quick_select_title", kind=t(self.lang, "quick_select_theme"))
+            for th in SUPPORTED_THEMES:
+                cur = "● " if self.tui_theme == th else "  "
+                options.append(("theme", th, f"{cur}{th}"))
+
+        def _on_selected(choice: tuple[str, str] | None) -> None:
+            if not choice:
+                return
+            cat, val = choice
+            cmd_map = {"model": "/model", "effort": "/effort", "mode": "/mode", "theme": "/theme"}
+            cmd = cmd_map.get(cat)
+            if cmd:
+                self._run_palette_cmd(f"{cmd} {val}")
+
+        self.push_screen(QuickSelectModal(title, options, lang=self.lang), callback=_on_selected)
+
     async def action_cancel_turn(self) -> None:
         self._turn_cancelled_flag = True
         await self.client.cancel_turn()
@@ -1294,6 +1866,52 @@ class MainWorkspaceControllerMixin:
         await self._apply_initial_profile(sid)
         self._refresh_ui()
         await self._append_notice(t(self.lang, "session_started", sid=sid[:12]), session_id=sid)
+
+    async def action_fork_session(self, session_id: str | None = None) -> None:
+        if not self.client.is_connected:
+            return
+        src_sid = session_id or self.client.active_session_id or self.registry.active_session_id
+        if not src_sid:
+            return
+        if not self.client.supports_fork:
+            self._toast(t(self.lang, "fork_unsupported"), severity="warning")
+            return
+        try:
+            new_sid = await self.client.fork_session(src_sid, self.client_config.cwd)
+        except Exception as exc:
+            self._toast(t(self.lang, "fork_failed", err=exc), severity="error")
+            return
+        if not new_sid:
+            self._toast(t(self.lang, "fork_unsupported"), severity="warning")
+            return
+        self._ensure_state(new_sid, activate=True)
+        await self._ensure_transcript(new_sid, activate=True)
+        self._refresh_ui()
+        self._toast(t(self.lang, "fork_done", sid=new_sid[:12]))
+        await self._append_notice(t(self.lang, "fork_done", sid=new_sid[:12]), session_id=new_sid)
+
+    async def _close_session_by_id(self, session_id: str) -> None:
+        if not self.client.is_connected:
+            return
+        active_sid = self.registry.active_session_id or self.client.active_session_id
+        if session_id == active_sid:
+            self._toast(t(self.lang, "session_close_active_warn"), severity="warning")
+            return
+        try:
+            await self.client.close_session(session_id)
+        except Exception:
+            pass
+        self.registry.sessions.pop(session_id, None)
+        self.registry.prompt_queues.pop(session_id, None)
+        self.registry.drafts.pop(session_id, None)
+        tr = self._transcripts.pop(session_id, None)
+        if tr is not None:
+            try:
+                await tr.remove()
+            except Exception:
+                pass
+        self._refresh_ui()
+        self._toast(t(self.lang, "session_closed", sid=session_id[:12]))
 
     async def _resume_session_by_id(self, session_id: str) -> None:
         if not self.client.is_connected:
@@ -1361,17 +1979,32 @@ class MainWorkspaceControllerMixin:
                 acp_sessions.append({"session_id": sid, "model": st.model_id, "title": st.active_goal})
         db_meta = await asyncio.to_thread(load_sessions_meta_readonly, self.ogy_config.db_path)
 
-        def _on_picked(chosen_sid: str | None) -> None:
-            if chosen_sid:
-                task = asyncio.create_task(self._resume_session_by_id(chosen_sid))
-                self._inflight_tasks.add(task)
-                task.add_done_callback(self._inflight_tasks.discard)
+        def _on_picked(result: Any) -> None:
+            if not result:
+                return
+            if isinstance(result, dict):
+                act = result.get("action")
+                sid = str(result.get("session_id") or "")
+                if not sid:
+                    return
+                if act == "fork":
+                    coro = self.action_fork_session(sid)
+                elif act == "close":
+                    coro = self._close_session_by_id(sid)
+                else:
+                    coro = self._resume_session_by_id(sid)
+            else:
+                coro = self._resume_session_by_id(str(result))
+            task = asyncio.create_task(coro)
+            self._inflight_tasks.add(task)
+            task.add_done_callback(self._inflight_tasks.discard)
 
         self.push_screen(
             SessionPickerModal(
                 acp_sessions,
                 db_meta,
                 active_session_id=self.registry.active_session_id,
+                supports_fork=self.client.supports_fork,
                 lang=self.lang,
             ),
             callback=_on_picked,

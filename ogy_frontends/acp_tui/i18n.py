@@ -191,6 +191,64 @@ STRINGS: dict[str, dict[str, str]] = {
         "pal_find_help": "Ouvre la barre de recherche intra-conversation",
         "pal_status": "Optigravity: Résumé de session (/status)",
         "pal_status_help": "Affiche la télémétrie et le ROI de la session active",
+        # V3.7 agy parity + ogy superpowers
+        "plan_title": "Plan agent · {done}/{total} ({pct}%)",
+        "shell_attach_btn": "Insérer dans le prompt",
+        "shell_attached": "Sortie shell insérée dans le compositeur ({chars} car.).",
+        "shell_timeout": "Commande interrompue après {sec}s.",
+        "shell_running": "Shell local : {cmd}…",
+        "diff_title": "Git Diff (workspace)",
+        "diff_clean": "Working tree propre — aucune modification Git détectée.",
+        "diff_not_git": "Impossible de lire git diff dans ce répertoire.",
+        "attach_usage": "Usage : /attach <chemin_image> (png, jpg, jpeg, webp, gif · max 10 Mo)",
+        "attach_not_found": "Fichier introuvable : {path}",
+        "attach_unsupported": "Format non supporté ({ext}). Formats acceptés : png, jpg, jpeg, webp, gif.",
+        "attach_too_large": "Image trop volumineuse ({size}) — limite 10 Mo.",
+        "attach_done": "Image attachée : {chip} ({size})",
+        "fork_unsupported": "Le serveur ACP actif ne supporte pas `session/fork`.",
+        "fork_done": "Session forkée → {sid} (session parente conservée dans Ctrl+S).",
+        "fork_failed": "Échec du fork : {err}",
+        "session_closed": "Session fermée : {sid}",
+        "session_close_active_warn": "Impossible de fermer la session active — basculez d'abord.",
+        "sessions_fork_btn": "Forker (Ctrl+F)",
+        "sessions_close_btn": "Fermer (Ctrl+X)",
+        "quick_select_title": "Sélecteur rapide : {kind}",
+        "quick_select_filter": "Filtrer les options… (Entrée applique · Échap ferme)",
+        "quick_select_model": "Modèle (avec Switch Tax estimée)",
+        "quick_select_effort": "Effort de raisonnement",
+        "quick_select_mode": "Mode d'exécution ACP",
+        "quick_select_theme": "Thème visuel",
+        "mode_cycled": "Mode → {val} (Shift+Tab)",
+        "thoughts_toggled": "Blocs de réflexion : {state}",
+        "thoughts_expanded": "dépliés",
+        "thoughts_collapsed": "repliés",
+        "context_modal_title": "Inspecteur de contexte Optigravity (/context)",
+        "mcp_header": "Serveurs MCP configurés :",
+        "mcp_empty": "Aucun serveur MCP configuré dans mcp_config.json ou .agents/mcp_config.json.",
+        "config_updated": "Configuration mise à jour : {key} = {val}",
+        "config_failed": "Erreur config : {err}",
+        "metric_cache_saved": "Économies cache",
+        "budget_cap_warning": "Plafond budget atteint : ${cost:.4f} / ${cap:.2f} (avertissement non bloquant).",
+        "cmd_diff": "Afficher le git diff du workspace en plein écran (0 token)",
+        "cmd_attach": "Joindre une image au prompt (/attach <chemin>)",
+        "cmd_fork": "Forker la session ACP active dans une nouvelle branche",
+        "cmd_compact": "Alias agy de /rotate (handoff + session fraîche)",
+        "cmd_context": "Inspecter fenêtre contexte, cache, règles, skills & firebreaks",
+        "cmd_mcp": "Lister les serveurs MCP configurés (profil & workspace)",
+        "cmd_config": "Afficher ou modifier config.toml (/config [clé valeur])",
+        "cmd_select": "Ouvrir le sélecteur rapide modèle/effort/mode/thème (Alt+M)",
+        "pal_diff": "Optigravity: Voir Git Diff (/diff)",
+        "pal_diff_help": "Ouvre git status + git diff en plein écran (0 token)",
+        "pal_fork": "Optigravity: Forker la session (/fork)",
+        "pal_fork_help": "Crée une branche ACP isolée de la session courante",
+        "pal_context": "Optigravity: Inspecteur de contexte (/context)",
+        "pal_context_help": "Radiographie contexte, économies cache, règles & firebreaks",
+        "pal_mcp": "Optigravity: Serveurs MCP (/mcp)",
+        "pal_mcp_help": "Liste les serveurs MCP configurés et leur statut",
+        "pal_select": "Optigravity: Sélecteur rapide modèle/mode (Alt+M)",
+        "pal_select_help": "Choisir modèle (avec Switch Tax $), effort, mode ou thème",
+        "pal_thoughts": "Optigravity: Déplier / Replier réflexions (Ctrl+T)",
+        "pal_thoughts_help": "Bascule l'affichage de tous les blocs ThoughtBlock",
     },
     "en": {
         "connecting": "Connecting to agy acp...",
@@ -378,6 +436,64 @@ STRINGS: dict[str, dict[str, str]] = {
         "pal_find_help": "Open the in-conversation search bar",
         "pal_status": "Optigravity: Session Status (/status)",
         "pal_status_help": "Display live telemetry and ROI for the active session",
+        # V3.7 agy parity + ogy superpowers
+        "plan_title": "Agent Plan · {done}/{total} ({pct}%)",
+        "shell_attach_btn": "Attach to prompt",
+        "shell_attached": "Shell output attached to composer ({chars} chars).",
+        "shell_timeout": "Command timed out after {sec}s.",
+        "shell_running": "Local shell: {cmd}…",
+        "diff_title": "Git Diff (workspace)",
+        "diff_clean": "Working tree clean — no Git changes detected.",
+        "diff_not_git": "Unable to read git diff in this directory.",
+        "attach_usage": "Usage: /attach <image_path> (png, jpg, jpeg, webp, gif · max 10 MB)",
+        "attach_not_found": "File not found: {path}",
+        "attach_unsupported": "Unsupported format ({ext}). Supported: png, jpg, jpeg, webp, gif.",
+        "attach_too_large": "Image too large ({size}) — limit is 10 MB.",
+        "attach_done": "Image attached: {chip} ({size})",
+        "fork_unsupported": "Active ACP server does not support `session/fork`.",
+        "fork_done": "Session forked → {sid} (parent kept in Ctrl+S).",
+        "fork_failed": "Fork failed: {err}",
+        "session_closed": "Session closed: {sid}",
+        "session_close_active_warn": "Cannot close the active session — switch first.",
+        "sessions_fork_btn": "Fork (Ctrl+F)",
+        "sessions_close_btn": "Close (Ctrl+X)",
+        "quick_select_title": "Quick Select: {kind}",
+        "quick_select_filter": "Filter options… (Enter applies · Esc closes)",
+        "quick_select_model": "Model (with estimated Switch Tax)",
+        "quick_select_effort": "Reasoning Effort",
+        "quick_select_mode": "ACP Execution Mode",
+        "quick_select_theme": "Visual Theme",
+        "mode_cycled": "Mode → {val} (Shift+Tab)",
+        "thoughts_toggled": "Reasoning blocks: {state}",
+        "thoughts_expanded": "expanded",
+        "thoughts_collapsed": "collapsed",
+        "context_modal_title": "Optigravity Context Inspector (/context)",
+        "mcp_header": "Configured MCP servers:",
+        "mcp_empty": "No MCP servers configured in mcp_config.json or .agents/mcp_config.json.",
+        "config_updated": "Config updated: {key} = {val}",
+        "config_failed": "Config error: {err}",
+        "metric_cache_saved": "Cache saved",
+        "budget_cap_warning": "Budget hard cap reached: ${cost:.4f} / ${cap:.2f} (non-blocking warning).",
+        "cmd_diff": "View workspace git diff fullscreen (0 tokens)",
+        "cmd_attach": "Attach an image to the prompt (/attach <path>)",
+        "cmd_fork": "Fork active ACP session into a new branch",
+        "cmd_compact": "agy alias for /rotate (handoff + fresh session)",
+        "cmd_context": "Inspect context window, cache savings, rules, skills & firebreaks",
+        "cmd_mcp": "List configured MCP servers (profile & workspace)",
+        "cmd_config": "Show or update config.toml (/config [key value])",
+        "cmd_select": "Open quick selector for model/effort/mode/theme (Alt+M)",
+        "pal_diff": "Optigravity: View Git Diff (/diff)",
+        "pal_diff_help": "Open git status + git diff fullscreen (0 tokens)",
+        "pal_fork": "Optigravity: Fork Session (/fork)",
+        "pal_fork_help": "Branch the active ACP session into a new isolated thread",
+        "pal_context": "Optigravity: Context Inspector (/context)",
+        "pal_context_help": "X-ray view of context, cache savings, rules & firebreaks",
+        "pal_mcp": "Optigravity: MCP Servers (/mcp)",
+        "pal_mcp_help": "List configured MCP servers and status",
+        "pal_select": "Optigravity: Quick Selector (Alt+M)",
+        "pal_select_help": "Pick model (with Switch Tax $), effort, mode, or theme",
+        "pal_thoughts": "Optigravity: Toggle Reasoning Blocks (Ctrl+T)",
+        "pal_thoughts_help": "Expand or collapse all ThoughtBlock drawers",
     },
 }
 
@@ -424,13 +540,13 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 ## Santé du contexte (Zones)
 - **SAIN (`keep_warm`)** : `< 60K` tokens et cache actif. Gardez la session chaude pour profiter du tarif cache réduit.
 - **ATTENTION (`frugal_btw`)** : `60K–100K` tokens, `15–25` tours, ou cache `< 60%`. Évitez les lectures inutiles et utilisez **`/btw <question>`** pour les questions annexes courtes.
-- **SATURÉ (`clear_handoff`)** : `>= 100K` tokens ou cache expiré (`> 180s` d'inactivité au-delà de 60K). Utilisez **`/rotate`** (ou `Alt+R`) pour repartir sur une session neuve via `.ogy/handoff.md`.
+- **SATURÉ (`clear_handoff`)** : `>= 100K` tokens ou cache expiré (`> 180s` d'inactivité au-delà de 60K). Utilisez **`/rotate`** (ou `/compact` / `Alt+R`) pour repartir sur une session neuve via `.ogy/handoff.md`.
 - **SATURÉ (`compact`)** : compaction rentable uniquement s'il reste suffisamment de tours sans erreurs.
 - **ÉCHECS (`rewind`)** : `>= 2` échecs d'outils consécutifs. Ne compactez jamais des erreurs ; changez d'approche ou faites une rotation.
 
 ## Métriques de la barre latérale
 - **Contexte** : taille actuelle du contexte par rapport à la fenêtre maximale du modèle.
-- **Cache prompt** : pourcentage de tokens lus depuis le cache (coût réduit jusqu'à 90%).
+- **Cache prompt & Économies cache** : pourcentage de tokens lus depuis le cache (jusqu'à 90% moins cher) et dollars économisés en temps réel.
 - **Raisonnement (`Thought Tokens`)** : tokens de réflexion interne du modèle (facturés au tarif sortie).
 - **Inactivité (`Idle Gap`)** : temps écoulé depuis le dernier tour. Au-delà de **180 s**, le cache implicite Gemini risque l'éviction.
 - **Switch Tax** : coût d'invalidation du cache lorsqu'on change de modèle/effort en milieu de session chaude. Au-delà de `60K` tokens, déléguer à un sous-agent est moins cher.
@@ -439,20 +555,18 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 - **Gemini (5h / 7j)** : enveloppe de quota des modèles Gemini (`gemini-5h`, `gemini-weekly`).
 - **Tiers / Claude (`3p-5h` / `3p-weekly`)** : **`3p` = Third-Party** (modèles tiers comme Claude 5.5 inclus dans votre abonnement Google AI Pro/Ultra, avec quota distinct de Gemini).
 
-## Raccourcis & Commandes utiles
-- `/theme dark|light|high-contrast` : changer le thème visuel
-- `/lang fr` ou `/lang en` : changer la langue de l'interface
-- `/btw <question>` : poser une question annexe concise sans modifier de fichiers
-- `/copy [code]` · `/export [chemin]` · `/status` : copier, exporter en Markdown, ou résumer la session
-- `Ctrl+P` : Palette de commandes complète (modèles, modes, efforts, thèmes, langue, rotation, glossaire…)
-- `Ctrl+F` : Rechercher dans la conversation active
-- `Ctrl+R` : Recherche inverse dans l'historique des prompts
-- `Ctrl+S` : Sélecteur de sessions fuzzy (`/resume`)
-- `Ctrl+O` : Basculer la verbosité des cartes outils
-- `Ctrl+B` : Afficher / masquer le panneau télémétrie
-- `Ctrl+C` : Annuler le tour en cours sans fermer `agy acp`
-- `Alt+R` / `Alt+D` / `Alt+U` : Appliquer une proposition d'orchestration (rotation, délégation, escalade)
-- `F1` : Ouvrir / fermer ce glossaire
+## Raccourcis & Commandes utiles (V3.7)
+- `!<commande>` / `!w <commande>` : exécuter un shell local (`!w` compresse via `ogy wrap`) et réinjecter la sortie
+- `/diff` · `/attach <img.png>` · `/fork` · `/compact` : git diff live, pièce jointe image, fork de session, rotation
+- `/context` · `/mcp` · `/config [clé val]` · `/status` : inspecter contexte/règles/firebreaks, serveurs MCP, ou config
+- `/theme dark|light|high-contrast` · `/lang fr|en` : thème visuel (100% modales incluses) et langue
+- `/copy [code]` · `/export [chemin]` · `/btw <question>` : copier, exporter en Markdown, question annexe
+- `Shift+Tab` : cycler le mode d'exécution (`default → accept-edits → auto → plan`)
+- `Alt+M` (`/select`) : sélecteur rapide modèle (avec Switch Tax `$`), effort, mode ou thème
+- `Ctrl+T` : déplier / replier tous les blocs de réflexion (`ThoughtBlock`)
+- `Ctrl+P` : Palette de commandes complète (inclut les commandes dynamiques `agy`)
+- `Ctrl+F` · `Ctrl+R` · `Ctrl+S` : recherche transcript, historique prompts, sessions (reprendre/fork/fermer)
+- `Ctrl+O` · `Ctrl+B` · `Ctrl+C` · `F1` : verbosité outils, télémétrie, annuler tour, glossaire
 """,
     "en": """\
 # Optigravity Vocabulary & Metrics
@@ -460,13 +574,13 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 ## Context Health (Zones)
 - **HEALTHY (`keep_warm`)**: `< 60K` tokens with warm cache. Keep the session warm for discounted cached input.
 - **CAUTION (`frugal_btw`)**: `60K–100K` tokens, `15–25` turns, or cache `< 60%`. Avoid unnecessary reads and use **`/btw <question>`** for brief side questions.
-- **SATURATED (`clear_handoff`)**: `>= 100K` tokens or cold cache (`> 180s` idle above 60K). Run **`/rotate`** (or `Alt+R`) to start fresh via `.ogy/handoff.md`.
+- **SATURATED (`clear_handoff`)**: `>= 100K` tokens or cold cache (`> 180s` idle above 60K). Run **`/rotate`** (or `/compact` / `Alt+R`) to start fresh via `.ogy/handoff.md`.
 - **SATURATED (`compact`)**: compaction breaks even only if enough error-free turns remain.
 - **FAILURES (`rewind`)**: `>= 2` consecutive tool errors. Never compact failures; change strategy or rotate.
 
 ## Sidebar Metrics
 - **Context**: current context size vs the model's maximum context window.
-- **Prompt Cache**: percentage of prompt tokens served from cache (up to 90% cheaper).
+- **Prompt Cache & Cache Saved**: percentage of prompt tokens served from cache (up to 90% cheaper) and live estimated USD saved.
 - **Reasoning (`Thought Tokens`)**: internal thinking tokens (billed at output rate).
 - **Idle Gap**: time since the last completed turn. Beyond **180 s**, Gemini's implicit cache risks eviction.
 - **Switch Tax**: cache invalidation cost incurred when switching model/effort mid-session. Above `60K` tokens, delegating to a subagent is cheaper.
@@ -475,20 +589,18 @@ GLOSSARY_MARKDOWN: dict[str, str] = {
 - **Gemini (5h / 7d)**: Gemini quota buckets (`gemini-5h`, `gemini-weekly`).
 - **3rd-Party / Claude (`3p-5h` / `3p-weekly`)**: **`3p` = Third-Party** (non-Gemini models such as Claude 5.5 included in Google AI Pro/Ultra, tracked separately).
 
-## Useful Shortcuts & Commands
-- `/theme dark|light|high-contrast`: switch visual theme
-- `/lang en` or `/lang fr`: switch UI language
-- `/btw <question>`: ask a concise side question without editing files
-- `/copy [code]` · `/export [path]` · `/status`: copy, export to Markdown, or inspect session summary
-- `Ctrl+P`: Full Command Palette (models, modes, efforts, themes, language, rotation, glossary…)
-- `Ctrl+F`: Search inside the active conversation
-- `Ctrl+R`: Reverse prompt history search
-- `Ctrl+S`: Fuzzy session switcher (`/resume`)
-- `Ctrl+O`: Toggle tool card verbosity
-- `Ctrl+B`: Toggle telemetry sidebar
-- `Ctrl+C`: Cancel the active turn without killing `agy acp`
-- `Alt+R` / `Alt+D` / `Alt+U`: Apply an orchestration proposal (rotate, delegate, upgrade)
-- `F1`: Open / close this glossary
+## Useful Shortcuts & Commands (V3.7)
+- `!<command>` / `!w <command>`: run local shell (`!w` compresses via `ogy wrap`) and attach output to prompt
+- `/diff` · `/attach <img.png>` · `/fork` · `/compact`: live git diff, image attachment, session fork, rotation
+- `/context` · `/mcp` · `/config [key val]` · `/status`: inspect context/rules/firebreaks, MCP servers, or config
+- `/theme dark|light|high-contrast` · `/lang en|fr`: visual theme (full modal coverage) and language
+- `/copy [code]` · `/export [path]` · `/btw <question>`: copy, Markdown export, concise side question
+- `Shift+Tab`: cycle execution mode (`default → accept-edits → auto → plan`)
+- `Alt+M` (`/select`): quick selector for model (with Switch Tax `$`), effort, mode, or theme
+- `Ctrl+T`: expand / collapse all reasoning blocks (`ThoughtBlock`)
+- `Ctrl+P`: Full Command Palette (includes dynamic `agy` commands)
+- `Ctrl+F` · `Ctrl+R` · `Ctrl+S`: transcript search, prompt history, sessions (resume/fork/close)
+- `Ctrl+O` · `Ctrl+B` · `Ctrl+C` · `F1`: tool verbosity, telemetry sidebar, cancel turn, glossary
 """,
 }
 

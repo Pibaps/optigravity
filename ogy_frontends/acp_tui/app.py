@@ -16,12 +16,14 @@ from ogy_frontends.acp_tui.i18n import SUPPORTED_LANGS, t
 from ogy_frontends.acp_tui.orchestrator import ActionProposal, SessionOrchestrator
 from ogy_frontends.acp_tui.screens.main import MainWorkspaceControllerMixin
 from ogy_frontends.acp_tui.screens.modals import (
+    ContextInspectorModal,
     DelegationModal,
     ElicitationModal,
     GlossaryModal,
     HandoffReviewModal,
     HelpGlossaryModal,
     PermissionModal,
+    QuickSelectModal,
     SessionPickerModal,
 )
 from ogy_frontends.acp_tui.state.sessions import SessionRegistry
@@ -34,6 +36,7 @@ from ogy_frontends.acp_tui.widgets.telemetry import (
 from ogy_frontends.acp_tui.widgets.transcript import SessionTranscript, _clean_file_links
 
 __all__ = [
+    "ContextInspectorModal",
     "DelegationModal",
     "ElicitationModal",
     "GlossaryModal",
@@ -44,6 +47,7 @@ __all__ = [
     "OptigravityApp",
     "OptigravityCommandProvider",
     "PermissionModal",
+    "QuickSelectModal",
     "SessionPickerModal",
     "TelemetryPanel",
     "_clean_file_links",
@@ -56,7 +60,7 @@ SUPPORTED_THEMES = ("dark", "light", "high-contrast")
 
 
 class OptigravityCommandProvider(Provider):
-    """Exposes Optigravity TUI commands, models, efforts, modes, themes, and languages in `Ctrl+P`."""
+    """Exposes Optigravity TUI commands, dynamic ACP commands, models, efforts, modes, themes, and languages in `Ctrl+P`."""
 
     def _build_entries(self) -> list[tuple[str, str, Any]]:
         app = self.app
@@ -65,6 +69,12 @@ class OptigravityCommandProvider(Provider):
         lang = app.lang
         entries: list[tuple[str, str, Any]] = [
             (t(lang, "pal_glossary"), t(lang, "pal_glossary_help"), app.action_show_glossary),
+            (t(lang, "pal_select"), t(lang, "pal_select_help"), lambda: app.action_open_quick_select("model")),
+            (t(lang, "pal_context"), t(lang, "pal_context_help"), lambda: app._run_palette_cmd("/context")),
+            (t(lang, "pal_diff"), t(lang, "pal_diff_help"), lambda: app._run_palette_cmd("/diff")),
+            (t(lang, "pal_mcp"), t(lang, "pal_mcp_help"), lambda: app._run_palette_cmd("/mcp")),
+            (t(lang, "pal_fork"), t(lang, "pal_fork_help"), app.action_fork_session),
+            (t(lang, "pal_thoughts"), t(lang, "pal_thoughts_help"), app.action_toggle_thoughts),
             (t(lang, "pal_find"), t(lang, "pal_find_help"), app.action_open_transcript_search),
             (t(lang, "pal_status"), t(lang, "pal_status_help"), lambda: app._run_palette_cmd("/status")),
             (t(lang, "pal_copy_last"), t(lang, "pal_copy_last_help"), lambda: app._run_palette_cmd("/copy")),
@@ -82,6 +92,10 @@ class OptigravityCommandProvider(Provider):
         if app.active_proposals:
             top = app.active_proposals[0]
             entries.insert(0, (t(lang, "pal_proposal", title=top.title), top.detail, app.action_accept_proposal))
+        for acmd in app.client.get_available_commands():
+            cname = f"/{acmd['name']}"
+            desc = acmd.get("description") or "ACP agent command"
+            entries.append((f"[agy] {cname}", desc, lambda c=cname: app._run_palette_cmd(c)))
         for th in SUPPORTED_THEMES:
             entries.append((t(lang, "pal_theme", val=th), t(lang, "pal_theme_help", val=th), lambda x=th: app._run_palette_cmd(f"/theme {x}")))
         for code, label in (("fr", "Français (fr)"), ("en", "English (en)")):
@@ -116,6 +130,9 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_turn", "Cancel", show=True, priority=True),
+        Binding("shift+tab", "cycle_mode", "Mode", show=False, priority=True),
+        Binding("alt+m", "open_quick_select", "Select", show=False),
+        Binding("ctrl+t", "toggle_thoughts", "Thoughts", show=False),
         Binding("ctrl+f", "open_transcript_search", "Find", show=True),
         Binding("ctrl+n", "new_session", "New", show=True),
         Binding("ctrl+s", "open_session_picker", "Sessions", show=True),
@@ -138,6 +155,8 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
         lang: str = "fr",
         tui_theme: str | None = None,
         subagents_service: Any = None,
+        resume_session_id: str | None = None,
+        continue_last: bool = False,
     ) -> None:
         super().__init__()
         self.lang = lang if lang in SUPPORTED_LANGS else "fr"
@@ -151,6 +170,8 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
         self.auto_connect = auto_connect
         self._injected_agent_conn = injected_agent_conn
         self.subagents_service = subagents_service
+        self.resume_session_id = resume_session_id
+        self.continue_last = continue_last
 
         self.client = AcpClient(
             self.client_config,
@@ -170,12 +191,13 @@ class OptigravityApp(MainWorkspaceControllerMixin, App[None]):
         self._inflight_tasks: set[asyncio.Task[Any]] = set()
         self.verbosity: str = "low"
 
-        # V3.6 UX state (responsive sidebar, git branch, queue cancel guard, search)
+        # V3.6 / V3.7 UX state (responsive sidebar, git branch, queue cancel guard, search, budget alerts)
         self._git_branch: str = ""
         self._sidebar_user_override: bool | None = None
         self._turn_cancelled_flag: bool = False
         self._search_matches: list[Any] = []
         self._search_idx: int = 0
+        self._budget_warned_sessions: set[str] = set()
 
         # Working spinner state
         self._working: bool = False
@@ -195,8 +217,10 @@ def run_tui(
     initial_prompt: str | None = None,
     model: str | None = None,
     effort: str | None = None,
-    lang: str = "fr",
+    lang: str | None = None,
     theme: str | None = None,
+    resume_session_id: str | None = None,
+    continue_last: bool = False,
     command_override: list[str] | None = None,
 ) -> int:
     """Launch the Optigravity Textual TUI."""
@@ -214,6 +238,9 @@ def run_tui(
             except json.JSONDecodeError:
                 pass
 
+    ogy_cfg = load_config()
+    resolved_lang = lang or ogy_cfg.language or "fr"
+
     cfg = AcpClientConfig(
         cwd=str(Path(cwd).resolve()),
         sandbox=sandbox,
@@ -225,11 +252,14 @@ def run_tui(
     )
     app = OptigravityApp(
         client_config=cfg,
+        ogy_config=ogy_cfg,
         initial_prompt=initial_prompt,
         initial_model=model,
         initial_effort=effort,
-        lang=lang,
+        lang=resolved_lang,
         tui_theme=theme,
+        resume_session_id=resume_session_id,
+        continue_last=continue_last,
     )
     app.run()
     return 0

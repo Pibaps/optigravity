@@ -315,11 +315,13 @@ class ElicitationModal(ModalScreen[dict[str, Any]]):
                 pass
 
 
-class SessionPickerModal(ModalScreen[str | None]):
-    """Fuzzy session switcher modal (`Ctrl+S` / `/resume`) enriched with ogy.db metadata."""
+class SessionPickerModal(ModalScreen[Any]):
+    """Fuzzy session switcher modal (`Ctrl+S` / `/resume`) enriched with ogy.db metadata, Fork & Close."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Close", show=False, priority=True),
+        Binding("ctrl+f", "fork_selected", "Fork", show=False, priority=True),
+        Binding("ctrl+x", "close_selected", "Close session", show=False, priority=True),
     ]
 
     def __init__(
@@ -328,12 +330,14 @@ class SessionPickerModal(ModalScreen[str | None]):
         db_meta: dict[str, dict[str, Any]],
         *,
         active_session_id: str | None = None,
+        supports_fork: bool = False,
         lang: str = "fr",
     ) -> None:
         super().__init__()
         self._raw_sessions = sessions
         self._db_meta = db_meta
         self._active_session_id = active_session_id
+        self._supports_fork = supports_fork
         self.lang = lang
         self._filtered_ids: list[str] = []
 
@@ -343,11 +347,21 @@ class SessionPickerModal(ModalScreen[str | None]):
             yield Input(placeholder=t(self.lang, "sessions_search_placeholder"), id="session-picker-filter")
             yield OptionList(id="session-picker-list")
             with Horizontal(classes="modal-buttons"):
+                if self._supports_fork:
+                    yield Button(t(self.lang, "sessions_fork_btn"), id="session-picker-fork", variant="primary")
+                yield Button(t(self.lang, "sessions_close_btn"), id="session-picker-close-sess", variant="error")
                 yield Button(t(self.lang, "glossary_close"), id="session-picker-close")
 
     def on_mount(self) -> None:
         self._populate("")
         self.query_one("#session-picker-filter", Input).focus()
+
+    def _current_selected_sid(self) -> str | None:
+        opt_list = self.query_one("#session-picker-list", OptionList)
+        idx = opt_list.highlighted if opt_list.highlighted is not None else 0
+        if 0 <= idx < len(self._filtered_ids):
+            return self._filtered_ids[idx]
+        return None
 
     def _populate(self, query: str) -> None:
         q = query.strip().lower()
@@ -386,10 +400,9 @@ class SessionPickerModal(ModalScreen[str | None]):
 
     @on(Input.Submitted, "#session-picker-filter")
     def _on_filter_submitted(self) -> None:
-        opt_list = self.query_one("#session-picker-list", OptionList)
-        idx = opt_list.highlighted if opt_list.highlighted is not None else 0
-        if 0 <= idx < len(self._filtered_ids):
-            self.dismiss(self._filtered_ids[idx])
+        sid = self._current_selected_sid()
+        if sid:
+            self.dismiss(sid)
 
     @on(OptionList.OptionSelected, "#session-picker-list")
     def _on_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -407,6 +420,18 @@ class SessionPickerModal(ModalScreen[str | None]):
             opt_list.action_cursor_up()
             event.prevent_default()
             event.stop()
+
+    @on(Button.Pressed, "#session-picker-fork")
+    def action_fork_selected(self) -> None:
+        sid = self._current_selected_sid()
+        if sid:
+            self.dismiss({"action": "fork", "session_id": sid})
+
+    @on(Button.Pressed, "#session-picker-close-sess")
+    def action_close_selected(self) -> None:
+        sid = self._current_selected_sid()
+        if sid:
+            self.dismiss({"action": "close", "session_id": sid})
 
     @on(Button.Pressed, "#session-picker-close")
     def action_cancel(self) -> None:
@@ -537,3 +562,109 @@ class HelpGlossaryModal(ModalScreen[None]):
 
 
 GlossaryModal = HelpGlossaryModal
+
+
+class QuickSelectModal(ModalScreen[tuple[str, str] | None]):
+    """Keyboard-first filterable quick selector (`Alt+M` / `/select`) for model, effort, mode, or theme."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close", show=False, priority=True),
+    ]
+
+    def __init__(
+        self,
+        title: str,
+        options: list[tuple[str, str, str]],  # (category, value, display_label)
+        *,
+        lang: str = "fr",
+    ) -> None:
+        super().__init__()
+        self._title = title
+        self._all_options = list(options)
+        self.lang = lang
+        self._filtered: list[tuple[str, str, str]] = []
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal-dialog", id="quick-select-dialog"):
+            yield Static(self._title, classes="modal-title", markup=False)
+            yield Input(placeholder=t(self.lang, "quick_select_filter"), id="quick-select-filter")
+            yield OptionList(id="quick-select-list")
+            with Horizontal(classes="modal-buttons"):
+                yield Button(t(self.lang, "glossary_close"), id="quick-select-close")
+
+    def on_mount(self) -> None:
+        self._populate("")
+        self.query_one("#quick-select-filter", Input).focus()
+
+    def _populate(self, query: str) -> None:
+        q = query.strip().lower()
+        opt_list = self.query_one("#quick-select-list", OptionList)
+        opt_list.clear_options()
+        self._filtered = []
+        for idx, (cat, val, label) in enumerate(self._all_options):
+            if q and q not in label.lower() and q not in val.lower() and q not in cat.lower():
+                continue
+            self._filtered.append((cat, val, label))
+            opt_list.add_option(Option(label, id=f"qs-{idx}"))
+        if self._filtered:
+            opt_list.highlighted = 0
+
+    @on(Input.Changed, "#quick-select-filter")
+    def _on_filter_changed(self, event: Input.Changed) -> None:
+        self._populate(event.value)
+
+    @on(Input.Submitted, "#quick-select-filter")
+    def _on_filter_submitted(self) -> None:
+        opt_list = self.query_one("#quick-select-list", OptionList)
+        idx = opt_list.highlighted if opt_list.highlighted is not None else 0
+        if 0 <= idx < len(self._filtered):
+            cat, val, _ = self._filtered[idx]
+            self.dismiss((cat, val))
+
+    @on(OptionList.OptionSelected, "#quick-select-list")
+    def _on_option_selected(self, event: OptionList.OptionSelected) -> None:
+        idx = event.option_index
+        if 0 <= idx < len(self._filtered):
+            cat, val, _ = self._filtered[idx]
+            self.dismiss((cat, val))
+
+    def on_key(self, event: events.Key) -> None:
+        opt_list = self.query_one("#quick-select-list", OptionList)
+        if event.key == "down":
+            opt_list.action_cursor_down()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "up":
+            opt_list.action_cursor_up()
+            event.prevent_default()
+            event.stop()
+
+    @on(Button.Pressed, "#quick-select-close")
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ContextInspectorModal(ModalScreen[None]):
+    """X-ray context & Optigravity superpowers inspector (`/context`)."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", show=False, priority=True),
+        Binding("q", "close", "Close", show=False),
+    ]
+
+    def __init__(self, markdown_report: str, *, lang: str = "fr") -> None:
+        super().__init__()
+        self._markdown = markdown_report
+        self.lang = lang
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal-dialog", id="context-inspector-dialog"):
+            yield Static(t(self.lang, "context_modal_title"), classes="modal-title", markup=False)
+            with VerticalScroll(id="context-inspector-scroll"):
+                yield Markdown(self._markdown, parser_factory=create_safe_markdown_parser)
+            with Horizontal(classes="modal-buttons"):
+                yield Button(t(self.lang, "glossary_close"), id="context-close-btn")
+
+    @on(Button.Pressed, "#context-close-btn")
+    def action_close(self) -> None:
+        self.dismiss(None)
