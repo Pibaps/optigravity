@@ -209,9 +209,12 @@ def render_statusline(
     q5h, qwk = _pick_quota_buckets(payload.get("quota"), model_name)
 
     if persist:
-        if session_id:
-            state_file = resolved_cfg.state_dir / f"sl_{session_id}.ts"
-            if _should_persist_snapshot(state_file, resolved_cfg.statusline_debounce_s):
+        has_quota = isinstance(payload.get("quota"), dict) and bool(payload.get("quota"))
+        force_persist = os.environ.get("OGY_STATUSLINE_FORCE_PERSIST") == "1"
+        if session_id or has_quota:
+            debounce_key = f"sl_{session_id}.ts" if session_id else "sl_global_quota.ts"
+            state_file = resolved_cfg.state_dir / debounce_key
+            if force_persist or _should_persist_snapshot(state_file, resolved_cfg.statusline_debounce_s):
                 try:
                     resolved_cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
                     conn = sqlite3.connect(str(resolved_cfg.db_path), timeout=0.45, isolation_level=None)

@@ -190,10 +190,15 @@ def build_agy_acp_args(
     *,
     settings_path: Path | str | None = None,
 ) -> list[str]:
-    """Build official `agy acp` CLI flags (including `--settings` in V3.1 isolated mode)."""
+    """Build official `agy acp` CLI flags.
+
+    Note: `agy acp` does NOT support `--settings` (unlike root `agy`, it exits with
+    `flags provided but not defined: -settings`). V3.1 profile isolation for `agy acp`
+    is enforced via `USERPROFILE`/`HOME` and `OGY_GEMINI_HOME` in `build_agy_acp_env`.
+    `settings_path` is kept as an unused keyword parameter for backwards compatibility.
+    """
+    _ = settings_path
     args: list[str] = ["acp"]
-    if settings_path:
-        args.extend(["--settings", str(settings_path)])
     if cfg.sandbox:
         args.append("--sandbox")
     for d in cfg.add_dirs:
@@ -411,20 +416,12 @@ class AcpClient:
             self._exit_stack = AsyncExitStack()
             env = build_agy_acp_env(self.ogy_config)
             bridge = _BridgeClient(self)
-            gemini_dir = self.ogy_config.gemini_home or self.ogy_config.agy_cli_dir.parent
-            settings_path: Path | None = (
-                (gemini_dir / "antigravity-cli" / "settings.json")
-                if self.ogy_config.profile_mode == "isolated"
-                else None
-            )
             if self.config.command_override:
                 cmd = self.config.command_override[0]
                 args = list(self.config.command_override[1:])
-                if settings_path and "--settings" not in args:
-                    args.extend(["--settings", str(settings_path)])
             else:
                 cmd = shutil.which(self.config.agy_bin) or self.config.agy_bin
-                args = build_agy_acp_args(self.config, settings_path=settings_path)
+                args = build_agy_acp_args(self.config)
             conn, proc = await self._exit_stack.enter_async_context(
                 acp.spawn_agent_process(
                     bridge,

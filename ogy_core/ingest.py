@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,46 @@ def categorize_tool(tool_name: str) -> tuple[str, str | None]:
     return "other", None
 
 
+def ingest_quota_payload(
+    conn: sqlite3.Connection,
+    payload: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> int:
+    """Persist live OAuth quota buckets from a statusLine payload (works with or without session_id)."""
+    quota = payload.get("quota")
+    if not isinstance(quota, dict) or not quota:
+        return 0
+    now = utc_now_iso()
+    plan_tier = payload.get("plan_tier") or payload.get("planTier")
+    inserted = 0
+    with write_tx(conn):
+        for bucket_id, qinfo in quota.items():
+            if not isinstance(qinfo, dict):
+                continue
+            rem = _pick_float_or_none(qinfo, "remaining_fraction", "remainingFraction")
+            reset_t = qinfo.get("reset_time") or qinfo.get("resetTime")
+            reset_s = _pick_int_or_none(qinfo, "reset_in_seconds", "resetInSeconds")
+            conn.execute(
+                """
+                INSERT INTO quota_snapshots (
+                  session_id, bucket_id, remaining_fraction, reset_time, reset_in_seconds, plan_tier, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id or None,
+                    str(bucket_id),
+                    rem,
+                    reset_t,
+                    reset_s,
+                    plan_tier,
+                    now,
+                ),
+            )
+            inserted += 1
+    return inserted
+
+
 def ingest_statusline_payload(
     conn: sqlite3.Connection,
     payload: dict[str, Any],
@@ -110,6 +151,8 @@ def ingest_statusline_payload(
         payload.get("conversationId") or payload.get("session_id") or payload.get("conversation_id") or ""
     ).strip()
     if not session_id:
+        # Even before a conversationId is assigned, still persist live OAuth quota buckets.
+        ingest_quota_payload(conn, payload, session_id=None)
         return
 
     ws_paths = payload.get("workspacePaths") or payload.get("workspace_paths")
@@ -213,33 +256,7 @@ def ingest_statusline_payload(
                 (total_usd, subagent_usd, session_id),
             )
 
-    quota = payload.get("quota")
-    if isinstance(quota, dict):
-        now = utc_now_iso()
-        plan_tier = payload.get("plan_tier") or payload.get("planTier")
-        with write_tx(conn):
-            for bucket_id, qinfo in quota.items():
-                if not isinstance(qinfo, dict):
-                    continue
-                rem = _pick_float_or_none(qinfo, "remaining_fraction", "remainingFraction")
-                reset_t = qinfo.get("reset_time") or qinfo.get("resetTime")
-                reset_s = _pick_int_or_none(qinfo, "reset_in_seconds", "resetInSeconds")
-                conn.execute(
-                    """
-                    INSERT INTO quota_snapshots (
-                      session_id, bucket_id, remaining_fraction, reset_time, reset_in_seconds, plan_tier, captured_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session_id,
-                        str(bucket_id),
-                        rem,
-                        reset_t,
-                        reset_s,
-                        plan_tier,
-                        now,
-                    ),
-                )
+    ingest_quota_payload(conn, payload, session_id=session_id)
 
 
 def resolve_transcript_full_path(transcript_path: str | Path) -> Path | None:
@@ -638,8 +655,27 @@ def ingest_acp_turn(
     return est_cost
 
 
-def get_latest_quota_snapshots(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
-    """Return the most recent quota snapshot per bucket_id (5h / weekly) without polling agy."""
+def _parse_utc_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def get_latest_quota_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    stale_after_seconds: float = 1800.0,
+) -> dict[str, dict[str, Any]]:
+    """Return the most recent quota snapshot per bucket_id (5h / weekly) with freshness metadata."""
     rows = query_all(
         conn,
         """
@@ -653,5 +689,21 @@ def get_latest_quota_snapshots(conn: sqlite3.Connection) -> dict[str, dict[str, 
         ORDER BY q.bucket_id ASC
         """,
     )
-    return {str(r["bucket_id"]): dict(r) for r in rows}
+    now = datetime.now(timezone.utc)
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        item = dict(r)
+        captured_dt = _parse_utc_iso(item.get("captured_at"))
+        reset_dt = _parse_utc_iso(item.get("reset_time"))
+        # Google returns epoch-0 ("1970-01-01T00:00:00Z") when a bucket is full (100%) with no active rolling window.
+        if reset_dt is not None and reset_dt.year <= 1970:
+            reset_dt = None
+        age_s = max(0.0, (now - captured_dt).total_seconds()) if captured_dt is not None else None
+        is_expired = bool(reset_dt is not None and now >= reset_dt)
+        is_stale = is_expired or (age_s is not None and age_s > stale_after_seconds)
+        item["age_seconds"] = age_s
+        item["is_expired"] = is_expired
+        item["is_stale"] = is_stale
+        out[str(r["bucket_id"])] = item
+    return out
 

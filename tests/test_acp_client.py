@@ -285,11 +285,87 @@ def test_v31_acp_env_and_command_override(tmp_path: Path, monkeypatch: pytest.Mo
 
     asyncio.run(_run_override())
     assert captured["cmd"] == "python"
-    assert captured["args"][:4] == ["-m", "fake_acp_agent", "--scenario", "v31_env_audit"]
-    assert "--settings" in captured["args"]
-    assert str(iso_root / ".gemini" / "antigravity-cli" / "settings.json") in captured["args"]
+    assert captured["args"] == ["-m", "fake_acp_agent", "--scenario", "v31_env_audit"]
+    assert "--settings" not in captured["args"]
     assert captured["env"]["OGY_ACTIVE"] == "1"
     assert captured["env"]["USERPROFILE"] == str(iso_root)
+
+    # 4. Default agy acp args never pass --settings (agy acp rejects it) in isolated or shared mode
+    from ogy_frontends.acp_tui.client import build_agy_acp_args
+
+    acp_args_iso = build_agy_acp_args(
+        AcpClientConfig(cwd=str(tmp_path)),
+        settings_path=iso_root / ".gemini" / "antigravity-cli" / "settings.json",
+    )
+    acp_args_shared = build_agy_acp_args(AcpClientConfig(cwd=str(tmp_path)))
+    assert "--settings" not in acp_args_iso
+    assert acp_args_iso == acp_args_shared
+    assert acp_args_iso[0] == "acp"
+
+
+@pytest.mark.asyncio
+async def test_isolated_vs_shared_acp_stdio_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolated mode must behave identically to shared mode over real stdio ACP JSON-RPC 2.0."""
+    import json
+    from tests.conftest import fake_acp_command
+    from ogy_frontends.acp_tui.client import AgentMessageEvent
+
+    real_home = tmp_path / "real_home"
+    real_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: real_home)
+    monkeypatch.delenv("OGY_GEMINI_HOME", raising=False)
+    monkeypatch.delenv("OGY_REAL_HOME", raising=False)
+    monkeypatch.delenv("OGY_CONFIG_PATH", raising=False)
+    db_path = tmp_path / "parity.db"
+    monkeypatch.setenv("OGY_DB_PATH", str(db_path))
+
+    results: dict[str, dict[str, Any]] = {}
+    for mode in ("shared", "isolated"):
+        cfg = load_config()
+        cfg.profile_mode = mode
+        if mode == "isolated":
+            iso_root = real_home / ".local" / "share" / "optigravity" / "gemini-profile"
+            cfg.isolated_profile_root = iso_root
+            cfg.gemini_home = iso_root / ".gemini"
+            cfg.agy_cli_dir = cfg.gemini_home / "antigravity-cli"
+            cfg.agy_config_dir = cfg.gemini_home / "config"
+
+        events: list[Any] = []
+        client = AcpClient(
+            AcpClientConfig(cwd=str(tmp_path), command_override=fake_acp_command("v31_env_audit")),
+            ogy_config=cfg,
+            on_event=events.append,
+        )
+        await client.connect()
+        try:
+            sess = await client.new_session()
+            await client.send_prompt("audit env")
+        finally:
+            await client.close()
+
+        msg_text = "".join(e.text for e in events if isinstance(e, AgentMessageEvent))
+        audit = json.loads(msg_text)
+        results[mode] = {
+            "session_id": sess,
+            "supports_load": client.supports_load,
+            "audit": audit,
+        }
+
+    # Parity checks: both modes connect, create sessions, stream messages, and never pass --settings
+    assert results["isolated"]["supports_load"] == results["shared"]["supports_load"]
+    assert results["isolated"]["audit"]["has_settings_flag"] is False
+    assert results["shared"]["audit"]["has_settings_flag"] is False
+    assert results["isolated"]["audit"]["OGY_ACTIVE"] == "1"
+    assert results["shared"]["audit"]["OGY_ACTIVE"] == "1"
+
+    # Isolation proof: isolated mode redirects HOME/USERPROFILE/OGY_GEMINI_HOME while preserving DB/REAL_HOME
+    iso_audit = results["isolated"]["audit"]
+    expected_iso_root = str(real_home / ".local" / "share" / "optigravity" / "gemini-profile")
+    assert iso_audit["USERPROFILE"] == expected_iso_root
+    assert iso_audit["HOME"] == expected_iso_root
+    assert iso_audit["OGY_GEMINI_HOME"] == str(Path(expected_iso_root) / ".gemini")
+    assert iso_audit["OGY_REAL_HOME"] == str(real_home)
+    assert iso_audit["OGY_DB_PATH"] == str(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -483,8 +559,9 @@ async def test_fake_acp_stdio_v31_env_audit(tmp_path: Path, profile_mode: str) -
     assert report["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
 
     if profile_mode == "isolated":
-        assert report["has_settings_flag"] is True
-        assert report["settings_arg"] == str(ogy_cfg.agy_cli_dir / "settings.json")
+        # `agy acp` rejects `--settings` (only root `agy` accepts it); isolation is via env vars.
+        assert report["has_settings_flag"] is False
+        assert report["settings_arg"] is None
         assert report["OGY_GEMINI_HOME"] == str(ogy_cfg.gemini_home)
         assert report["USERPROFILE"] == str(ogy_cfg.isolated_profile_root)
         assert report["HOME"] == str(ogy_cfg.isolated_profile_root)

@@ -261,11 +261,11 @@ class SessionRegistry:
         return n
 
     def min_quota_fraction(self) -> float | None:
-        """Return minimum remaining_fraction from the latest non-blocking telemetry snapshot."""
+        """Return minimum remaining_fraction from non-expired quota snapshots."""
         fracs = [
             float(info["remaining_fraction"])
             for info in self.latest_snapshot.quotas.values()
-            if info.get("remaining_fraction") is not None
+            if info.get("remaining_fraction") is not None and not info.get("is_expired")
         ]
         return min(fracs) if fracs else None
 

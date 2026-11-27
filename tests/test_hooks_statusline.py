@@ -286,3 +286,51 @@ def test_v31_ogy_active_guard_and_opt_out(monkeypatch, tmp_path: Path, capsys) -
     )
     assert res_lock["decision"] == "deny"
     assert "ogy" in render_statusline(sl_payload, terminal_width=140, persist=False, cfg=cfg_optout)
+
+
+def test_statusline_persists_quota_without_session_id_and_tracks_freshness(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """StatusLine must persist live quota even before a conversationId exists, and detect expired/stale buckets."""
+    from ogy_core.ingest import get_latest_quota_snapshots
+    from ogy_core.storage import connect
+
+    monkeypatch.setenv("OGY_ACTIVE", "1")
+    monkeypatch.setenv("NO_COLOR", "1")
+    cfg = _cfg(tmp_path)
+
+    # 1. StatusLine with quota but NO conversationId must still persist into quota_snapshots
+    render_statusline(
+        {
+            "quota": {
+                "gemini-5h": {
+                    "remaining_fraction": 0.91,
+                    "reset_time": "2099-01-01T00:00:00Z",
+                    "reset_in_seconds": 18000,
+                },
+                "gemini-weekly": {
+                    "remaining_fraction": 0.42,
+                    "reset_time": "2020-01-01T00:00:00Z",
+                    "reset_in_seconds": 0,
+                },
+            }
+        },
+        terminal_width=140,
+        persist=True,
+        cfg=cfg,
+    )
+
+    conn = connect(cfg.db_path, init_schema=True)
+    try:
+        snaps = get_latest_quota_snapshots(conn)
+    finally:
+        conn.close()
+
+    assert "gemini-5h" in snaps
+    assert snaps["gemini-5h"]["remaining_fraction"] == 0.91
+    assert snaps["gemini-5h"]["is_expired"] is False
+    assert snaps["gemini-5h"]["is_stale"] is False
+
+    assert "gemini-weekly" in snaps
+    assert snaps["gemini-weekly"]["is_expired"] is True
+    assert snaps["gemini-weekly"]["is_stale"] is True

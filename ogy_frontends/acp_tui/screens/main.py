@@ -20,6 +20,7 @@ from textual.widgets import Button, ContentSwitcher, Footer, Header, Input, Stat
 
 from ogy_core import get_version
 from ogy_core.context_health import write_handoff
+from ogy_core.quota_sync import sync_quotas_via_agy_statusline
 from ogy_core.router import route_stage1
 from ogy_core.storage import connect, write_tx
 from ogy_frontends.acp_tui.client import (
@@ -452,6 +453,40 @@ class MainWorkspaceControllerMixin:
         self.registry.update_snapshot(snapshot)
         if self.current_state is not None:
             self._refresh_ui()
+        # Automatically trigger a silent one-shot statusLine quota sync if cache is empty or stale (> 120s)
+        quotas = snapshot.quotas
+        needs_sync = (not quotas) or any(
+            bool(info.get("is_stale")) or (isinstance(info.get("age_seconds"), (int, float)) and info["age_seconds"] > 120.0)
+            for info in quotas.values()
+        )
+        if needs_sync:
+            self._maybe_trigger_quota_sync(min_interval_s=120.0)
+
+    def _maybe_trigger_quota_sync(self, *, force: bool = False, min_interval_s: float = 120.0) -> None:
+        """Schedule a silent background `agy` statusLine quota refresh (skipped in tests / fake ACP)."""
+        if not getattr(self, "auto_connect", True):
+            return
+        if getattr(self.client_config, "command_override", None):
+            return
+        if getattr(self, "_injected_agent_conn", None) is not None:
+            return
+        now = time.monotonic()
+        last = float(getattr(self, "_last_quota_sync_ts", 0.0))
+        if not force and (now - last) < min_interval_s:
+            return
+        self._last_quota_sync_ts = now
+        self._sync_quotas_worker()
+
+    @work(thread=True, exclusive=True, group="quota-silent-sync")
+    def _sync_quotas_worker(self) -> None:
+        updated = sync_quotas_via_agy_statusline(
+            self.ogy_config,
+            agy_bin=self.client_config.agy_bin,
+            cwd=self.client_config.cwd,
+        )
+        if updated:
+            snap = fetch_telemetry_snapshot(self.ogy_config.db_path, self.registry.active_session_id)
+            self.call_from_thread(self._apply_telemetry_snapshot, snap)
 
     @work(thread=True, group="routing-decision-persist")
     def _persist_routing_decision_worker(
@@ -1175,6 +1210,7 @@ class MainWorkspaceControllerMixin:
             await self._append_notice(t(self.lang, "prompt_error", err=exc), level="err", session_id=sid)
         finally:
             self._set_working(False)
+            self._maybe_trigger_quota_sync(min_interval_s=60.0)
             if sid and not self._turn_cancelled_flag:
                 nxt = self.registry.pop_prompt(sid)
                 self._refresh_queue_bar()
@@ -2151,6 +2187,7 @@ class MainWorkspaceControllerMixin:
             await self._append_notice(t(self.lang, "delegate_failed", err=exc), level="err")
         finally:
             self._set_working(False)
+            self._maybe_trigger_quota_sync(min_interval_s=60.0)
 
     async def _execute_confirmed_rotation(self, handoff_content: str) -> None:
         """Write handoff, open fresh isolated session (keeping old session consultable in Ctrl+S)."""

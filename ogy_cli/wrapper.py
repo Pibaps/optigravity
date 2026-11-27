@@ -91,7 +91,7 @@ def run_agy(
         active_fractions = [
             float(snap["remaining_fraction"])
             for snap in latest_quotas.values()
-            if snap.get("remaining_fraction") is not None
+            if snap.get("remaining_fraction") is not None and not snap.get("is_expired")
         ]
         if active_fractions:
             remaining_quota = min(active_fractions)

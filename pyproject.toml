@@ -16,6 +16,7 @@ mcp = [
 tui = [
     "textual>=8.0.0",
     "agent-client-protocol>=1.0.0",
+    "pywinpty>=2.0; sys_platform == 'win32'",
 ]
 subagents = [
     "optigravity[mcp]",

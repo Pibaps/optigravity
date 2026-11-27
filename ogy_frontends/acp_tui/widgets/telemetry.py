@@ -158,6 +158,9 @@ class TelemetryPanel(VerticalScroll):
         yield Static(t(self.lang, "section_quotas"), id="sec-quotas", classes="panel-section", markup=False)
         with Vertical(id="quota-list"):
             yield Static(t(self.lang, "quotas_empty"), id="quota-empty", markup=False)
+            stale_hint = Static("", id="quota-stale-hint", markup=False)
+            stale_hint.display = False
+            yield stale_hint
 
         yield Static(t(self.lang, "section_subagents"), id="sec-subagents", classes="panel-section", markup=False)
         yield MetricRow(t(self.lang, "metric_api_spend"), "$0.0000 · 0 runs", val_id="tel-api-spend", row_id="row-api-spend")
@@ -249,46 +252,84 @@ class TelemetryPanel(VerticalScroll):
         self._refresh_quotas(quotas)
         self._refresh_subagents(subagent_runs or [], subagent_summary or {})
 
+    @staticmethod
+    def _format_age(seconds: float | None, lang: str) -> str:
+        if seconds is None:
+            return "?"
+        s = max(0, int(seconds))
+        if s < 60:
+            return f"{s}s"
+        if s < 3600:
+            return f"{s // 60}m"
+        if s < 86400:
+            return f"{s // 3600}h"
+        unit = "j" if lang == "fr" else "d"
+        return f"{s // 86400}{unit}"
+
     def _refresh_quotas(self, quotas: dict[str, dict[str, Any]]) -> None:
         container = self.query_one("#quota-list", Vertical)
         empty_lbl = self.query_one("#quota-empty", Static)
+        stale_lbl = self.query_one("#quota-stale-hint", Static)
 
-        valid_items: list[tuple[str, float]] = []
+        valid_items: list[tuple[str, float, dict[str, Any]]] = []
         for bid, info in sorted(quotas.items()):
             frac = info.get("remaining_fraction")
             if frac is not None:
-                valid_items.append((bid, max(0.0, min(100.0, float(frac) * 100.0))))
+                valid_items.append((bid, max(0.0, min(100.0, float(frac) * 100.0)), info))
 
         if not valid_items:
             empty_lbl.display = True
+            stale_lbl.display = False
             for gauge in self._quota_gauges.values():
                 gauge.display = False
             return
 
         empty_lbl.display = False
         seen: set[str] = set()
-        for bid, pct in valid_items:
+        max_stale_age: float | None = None
+        any_stale = False
+        for bid, pct, info in valid_items:
             seen.add(bid)
             label = human_quota_label(bid, self.lang)
-            sev = "ok" if pct >= 50.0 else ("warn" if pct >= 20.0 else "danger")
+            is_expired = bool(info.get("is_expired"))
+            is_stale = bool(info.get("is_stale"))
+            if is_stale:
+                any_stale = True
+                age_s = info.get("age_seconds")
+                if isinstance(age_s, (int, float)):
+                    max_stale_age = age_s if max_stale_age is None else max(max_stale_age, float(age_s))
+            if is_expired:
+                val_text = t(self.lang, "quotas_expired_val")
+                disp_pct = 0.0
+                sev = "warn"
+            else:
+                val_text = f"{int(round(pct))}%"
+                disp_pct = pct
+                sev = "ok" if pct >= 50.0 else ("warn" if pct >= 20.0 else "danger")
             gauge = self._quota_gauges.get(bid)
             if gauge is None:
                 gauge = MetricGauge(
                     label,
-                    f"{int(round(pct))}%",
-                    progress=pct,
+                    val_text,
+                    progress=disp_pct,
                     severity=sev,
                     id=f"quota-{_safe_widget_id(bid)}",
                 )
                 self._quota_gauges[bid] = gauge
-                container.mount(gauge)
+                container.mount(gauge, before=stale_lbl)
             else:
                 gauge.display = True
-                gauge.set_state(pct, f"{int(round(pct))}%", label=label, severity=sev)
+                gauge.set_state(disp_pct, val_text, label=label, severity=sev)
 
         for bid, gauge in self._quota_gauges.items():
             if bid not in seen:
                 gauge.display = False
+
+        if any_stale:
+            stale_lbl.update(t(self.lang, "quotas_stale_hint", age=self._format_age(max_stale_age, self.lang)))
+            stale_lbl.display = True
+        else:
+            stale_lbl.display = False
 
     def _refresh_subagents(
         self,
